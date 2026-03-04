@@ -1,207 +1,418 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createDeck, evaluateHand } from "./engine";
-import { DEFAULT_AGENTS, DEFAULT_STATS, ICONS, COLORS, STYLES, agentDecide } from "./agents";
+import { DEFAULT_AGENTS, DEFAULT_STATS, ICONS, COLORS, agentDecide, llmDecide, LLM_PROVIDERS } from "./agents";
 
-const API    = "http://localhost:8000";
-const SB     = 25;
-const BB     = 50;
-const START  = 1500;
+const API   = "http://localhost:8000";
+const SB    = 25;
+const BB    = 50;
+const START = 1500;
 
-// ─── CARD ────────────────────────────────────────────────────────────────────
+// ── Hand History tab ──────────────────────────────────────────────────────────
+// handHistory is passed in as prop — array of completed hand records
+function HandHistoryPanel({ hands }) {
+  const [selected, setSelected] = useState(null);
+
+  if (!hands || hands.length === 0) return (
+    <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",
+      flexDirection:"column",gap:12,background:"rgba(0,3,12,0.98)"}}>
+      <div style={{fontSize:13,color:"#1a4050",letterSpacing:3}}>NO HANDS PLAYED YET</div>
+      <div style={{fontSize:11,color:"#0d2535",letterSpacing:2}}>START A GAME TO SEE HAND HISTORY</div>
+    </div>
+  );
+
+  const detail = selected !== null ? hands[selected] : null;
+
+  return (
+    <div style={{flex:1,display:"flex",overflow:"hidden",background:"rgba(0,3,12,0.98)"}}>
+
+      {/* LEFT: hand list */}
+      <div style={{width:260,borderRight:"1px solid #091e30",overflowY:"auto",
+        scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+        <div style={{padding:"12px 14px",borderBottom:"1px solid #091e30",
+          fontSize:12,letterSpacing:3,color:"#3a7a90"}}>
+          HAND HISTORY · {hands.length} HANDS
+        </div>
+        {[...hands].reverse().map((h, ri) => {
+          const i = hands.length - 1 - ri;
+          const isSelected = selected === i;
+          return (
+            <div key={i} onClick={()=>setSelected(i)}
+              style={{padding:"10px 14px",borderBottom:"1px solid #081520",
+                cursor:"pointer",transition:"background 0.12s",
+                borderLeft:`3px solid ${isSelected?h.winnerColor:"transparent"}`,
+                background:isSelected?"rgba(0,245,255,0.04)":"transparent"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={{fontSize:11,color:"#3a6070",letterSpacing:2}}>HAND #{h.round}</span>
+                <span style={{fontSize:12,color:"#f0cc55",fontWeight:"bold"}}>◈ {h.pot}</span>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                <span style={{fontSize:14}}>{h.winnerIcon}</span>
+                <span style={{fontSize:12,color:h.winnerColor,fontWeight:"bold",letterSpacing:1}}>
+                  {h.winner}
+                </span>
+                <span style={{fontSize:10,color:"#4ade80",marginLeft:"auto",
+                  background:"rgba(74,222,128,0.08)",padding:"1px 6px",
+                  border:"1px solid #4ade8033"}}>WINS</span>
+              </div>
+              {h.hand && h.hand !== "—" && (
+                <div style={{fontSize:11,color:"#5a9070",letterSpacing:1}}>{h.hand}</div>
+              )}
+              {/* mini community cards */}
+              <div style={{display:"flex",gap:3,marginTop:4,flexWrap:"wrap"}}>
+                {(h.community||[]).map((c,ci)=>{
+                  const red=c.includes("♥")||c.includes("♦");
+                  return <span key={ci} style={{fontSize:10,color:red?"#ff8899":"#6090b0",
+                    background:"rgba(0,10,25,0.8)",padding:"1px 4px",
+                    border:`1px solid ${red?"#ff334422":"#1a3a55"}`,borderRadius:2}}>{c}</span>;
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* RIGHT: hand detail */}
+      <div style={{flex:1,overflowY:"auto",padding:20,
+        scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+        {!detail ? (
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+            height:"100%",fontSize:13,color:"#1a4050",letterSpacing:3}}>
+            ← SELECT A HAND TO REVIEW
+          </div>
+        ) : (
+          <>
+            {/* hand header */}
+            <div style={{marginBottom:20,paddingBottom:16,borderBottom:"1px solid #091e30"}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:14,marginBottom:10,flexWrap:"wrap"}}>
+                <span style={{fontSize:20,color:"#00f5ff",fontWeight:"bold",letterSpacing:3}}>
+                  HAND #{detail.round}
+                </span>
+                <span style={{fontSize:13,color:"#3a6070",letterSpacing:2}}>{detail.phase}</span>
+                <span style={{fontSize:14,color:"#f0cc55",fontWeight:"bold",marginLeft:"auto"}}>
+                  POT: ◈ {detail.pot}
+                </span>
+              </div>
+              {/* positions row */}
+              <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:10}}>
+                {[
+                  ["DEALER",detail.dealer,"#f0cc55"],
+                  ["SMALL BLIND",detail.sb,"#fb923c"],
+                  ["BIG BLIND",detail.bb,"#4ade80"],
+                ].map(([role,name,col])=> name ? (
+                  <div key={role} style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:10,padding:"2px 7px",letterSpacing:1,fontWeight:"bold",
+                      background:`${col}18`,border:`1px solid ${col}44`,color:col,
+                      borderRadius:2}}>{role}</span>
+                    <span style={{fontSize:12,color:"#8ab0c0"}}>{name}</span>
+                  </div>
+                ) : null)}
+              </div>
+              {/* board / community cards */}
+              {(detail.community||[]).length > 0 && (
+                <div>
+                  <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",marginBottom:6}}>BOARD</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    {(detail.community||[]).map((c,ci)=>{
+                      const red=c.includes("♥")||c.includes("♦");
+                      return (
+                        <div key={ci} style={{width:40,height:58,borderRadius:5,
+                          display:"flex",flexDirection:"column",alignItems:"center",
+                          justifyContent:"center",fontWeight:"bold",
+                          background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                          border:`1px solid ${red?"#ff4466":"#6699cc"}`,
+                          boxShadow:`0 0 8px ${red?"rgba(255,68,102,0.25)":"rgba(100,160,220,0.15)"}`,
+                          color:red?"#ff6688":"#c8d8f0"}}>
+                          <span style={{fontSize:10}}>{c.slice(0,-1)}</span>
+                          <span style={{fontSize:15}}>{c.slice(-1)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* winner */}
+            <div style={{marginBottom:16,padding:"12px 16px",
+              background:`${detail.winnerColor}0c`,
+              border:`1px solid ${detail.winnerColor}33`,borderRadius:4}}>
+              <div style={{fontSize:10,letterSpacing:2,color:"#3a7060",marginBottom:5}}>WINNER</div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:22}}>{detail.winnerIcon}</span>
+                <div>
+                  <div style={{fontSize:16,color:detail.winnerColor,fontWeight:"bold",letterSpacing:2}}>
+                    {detail.winner}
+                  </div>
+                  {detail.hand && detail.hand!=="—" && (
+                    <div style={{fontSize:12,color:"#7ad0a0",marginTop:2}}>
+                      {detail.hand}
+                    </div>
+                  )}
+                </div>
+                <div style={{marginLeft:"auto",fontSize:14,color:"#f0cc55",fontWeight:"bold"}}>
+                  +◈ {detail.pot}
+                </div>
+              </div>
+            </div>
+
+            {/* per-player action breakdown */}
+            <div style={{fontSize:11,letterSpacing:2,color:"#3a6070",marginBottom:10}}>
+              ACTION LOG
+            </div>
+            {(detail.players||[]).map((p,pi)=>(
+              <div key={pi} style={{marginBottom:12,padding:"10px 14px",
+                background:"rgba(0,8,22,0.7)",border:"1px solid #0a2030",borderRadius:4,
+                borderLeft:`3px solid ${p.color||"#2a4060"}`}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <span style={{fontSize:15}}>{p.icon||"◎"}</span>
+                  <span style={{fontSize:13,color:p.color||"#7ab8cc",fontWeight:"bold",
+                    letterSpacing:1,flex:1}}>{p.name}</span>
+                  {/* hole cards */}
+                  {(p.holeCards||[]).length===2&&(
+                    <div style={{display:"flex",gap:3}}>
+                      {p.holeCards.map((c,ci)=>{
+                        const red=c.includes("♥")||c.includes("♦");
+                        return <span key={ci} style={{fontSize:12,padding:"2px 5px",
+                          color:red?"#ff8899":"#90b8e0",
+                          background:"rgba(0,10,30,0.9)",
+                          border:`1px solid ${red?"#ff446633":"#335577"}`,
+                          borderRadius:3}}>{c}</span>;
+                      })}
+                    </div>
+                  )}
+                  {p.handRank&&(
+                    <span style={{fontSize:11,color:"#7ad0a0",letterSpacing:1}}>{p.handRank}</span>
+                  )}
+                  {p.folded&&!p.won&&(
+                    <span style={{fontSize:10,color:"#3a5060",letterSpacing:1,
+                      background:"rgba(0,0,0,0.3)",padding:"1px 6px",border:"1px solid #1a3040"}}>
+                      FOLDED
+                    </span>
+                  )}
+                  {p.won&&(
+                    <span style={{fontSize:10,color:"#4ade80",letterSpacing:1,
+                      background:"rgba(74,222,128,0.1)",padding:"1px 6px",
+                      border:"1px solid #4ade8033"}}>WON</span>
+                  )}
+                </div>
+                {/* street-by-street actions */}
+                {(p.streetActions||[]).length > 0 && (
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {p.streetActions.map((sa,si)=>{
+                      const actionColor = {
+                        fold:"#ff5555",check:"#7ab8cc",call:"#60a0e0",
+                        raise:"#f0cc55","all-in":"#ff6bff"
+                      }[sa.action]||"#5a8090";
+                      return (
+                        <div key={si} style={{display:"flex",alignItems:"center",gap:4,
+                          padding:"3px 8px",borderRadius:2,
+                          background:`${actionColor}12`,
+                          border:`1px solid ${actionColor}33`}}>
+                          <span style={{fontSize:9,color:"#3a5060",letterSpacing:1}}>
+                            {sa.street}
+                          </span>
+                          <span style={{fontSize:11,color:actionColor,fontWeight:"bold",
+                            letterSpacing:1,textTransform:"uppercase"}}>
+                            {sa.action}{sa.amount>0?` ◈${sa.amount}`:""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {p.thought&&(
+                  <div style={{marginTop:5,fontSize:11,color:"#4a7080",fontStyle:"italic"}}>
+                    "{p.thought}"
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function Card({ card, hidden, delay=0, sm }) {
   const [vis, setVis] = useState(false);
-  useEffect(() => { const t = setTimeout(() => setVis(true), delay); return () => clearTimeout(t); }, [card, delay]);
-  const red = card && (card.suit==="♥" || card.suit==="♦");
-  const w = sm ? 32 : 44, h = sm ? 44 : 64;
-  const base = { width:w, height:h, borderRadius:6, display:"flex", flexDirection:"column",
-    alignItems:"center", justifyContent:"center", fontWeight:"bold" };
+  useEffect(() => { const t = setTimeout(()=>setVis(true),delay); return ()=>clearTimeout(t); },[card,delay]);
+  const red = card && (card.suit==="♥"||card.suit==="♦");
+  const w=sm?32:44, h=sm?44:64;
+  const base={ width:w,height:h,borderRadius:6,display:"flex",flexDirection:"column",
+    alignItems:"center",justifyContent:"center",fontWeight:"bold" };
   if (hidden) return (
-    <div style={{ ...base, background:"linear-gradient(135deg,#0a0f1e,#1a2744)",
-      border:"1px solid #1e3a5f", boxShadow:"0 0 8px rgba(0,245,255,0.12)" }}>
-      <span style={{ color:"#1e3a5f", fontSize: sm?14:20 }}>⬡</span>
+    <div style={{...base,background:"linear-gradient(135deg,#0a0f1e,#1a2744)",
+      border:"1px solid #1e3a5f",boxShadow:"0 0 8px rgba(0,245,255,0.12)"}}>
+      <span style={{color:"#1e3a5f",fontSize:sm?14:20}}>⬡</span>
     </div>
   );
   return (
-    <div style={{ ...base, transition:"all 0.45s", opacity:vis?1:0,
+    <div style={{...base,transition:"all 0.45s",opacity:vis?1:0,
       transform:vis?"translateY(0)":"translateY(-8px)",
       background:"linear-gradient(135deg,#0d1b2a,#162032)",
       border:`1px solid ${red?"#ff4466":"#6699cc"}`,
       boxShadow:`0 0 10px ${red?"rgba(255,68,102,0.3)":"rgba(100,160,220,0.2)"}`,
-      color: red?"#ff6688":"#c8d8f0" }}>
-      <span style={{ fontSize: sm?9:11, lineHeight:1 }}>{card.rank}</span>
-      <span style={{ fontSize: sm?12:17, lineHeight:1 }}>{card.suit}</span>
+      color:red?"#ff6688":"#c8d8f0"}}>
+      <span style={{fontSize:sm?9:11,lineHeight:1}}>{card.rank}</span>
+      <span style={{fontSize:sm?12:17,lineHeight:1}}>{card.suit}</span>
     </div>
   );
 }
 
-// ─── SLIDER ──────────────────────────────────────────────────────────────────
+// ── Slider ────────────────────────────────────────────────────────────────────
 function Slider({ label, value, onChange, color="#00f5ff" }) {
   return (
-    <div style={{ marginBottom:10 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-        <span style={{ fontSize:13, letterSpacing:2, color:"#7ab8cc" }}>{label}</span>
-        <span style={{ fontSize:14, color, fontWeight:"bold" }}>{value}</span>
+    <div style={{marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+        <span style={{fontSize:13,letterSpacing:2,color:"#7ab8cc"}}>{label}</span>
+        <span style={{fontSize:14,color,fontWeight:"bold"}}>{value}</span>
       </div>
-      <div style={{ position:"relative", height:4, background:"#0a1e30", borderRadius:2 }}>
-        <div style={{ position:"absolute", left:0, top:0, height:"100%", width:`${value}%`,
-          background:`linear-gradient(90deg,${color}66,${color})`, borderRadius:2, transition:"width 0.1s" }}/>
+      <div style={{position:"relative",height:4,background:"#0a1e30",borderRadius:2}}>
+        <div style={{position:"absolute",left:0,top:0,height:"100%",width:`${value}%`,
+          background:`linear-gradient(90deg,${color}66,${color})`,borderRadius:2,transition:"width 0.1s"}}/>
         <input type="range" min={0} max={100} value={value}
-          onChange={e => onChange(Number(e.target.value))}
-          style={{ position:"absolute", inset:0, width:"100%", opacity:0, cursor:"pointer", height:"100%", margin:0 }}/>
+          onChange={e=>onChange(Number(e.target.value))}
+          style={{position:"absolute",inset:0,width:"100%",opacity:0,cursor:"pointer",height:"100%",margin:0}}/>
       </div>
     </div>
   );
 }
 
-// ─── AGENT POD ───────────────────────────────────────────────────────────────
+// ── AgentPod ──────────────────────────────────────────────────────────────────
 function AgentPod({ p, pos, gameActive, showCards, onRename, onRemove, isActive, isDealer }) {
-  const [editing, setEditing] = useState(false);
-  const [draft,   setDraft]   = useState(p.name);
-  const isElim   = p.eliminated;
-  const isFold   = p.folded && !isElim;
-  const statusLabel = isElim ? "ELIM" : isFold ? "FOLD" : p.lastAction ? p.lastAction.toUpperCase() : "WAIT";
-  const statusColor = isElim ? "#ff4444" : isFold ? "#334466" : p.color;
-
-  const commitName = () => {
-    if (draft.trim()) onRename(p.id, draft.trim());
-    setEditing(false);
-  };
+  const [editing,setEditing]=useState(false);
+  const [draft,setDraft]=useState(p.name);
+  const isElim=p.eliminated, isFold=p.folded&&!isElim, isQueued=p._queued;
+  const statusLabel=isQueued?"NEXT HAND":isElim?"ELIM":isFold?"FOLD":isActive?"ACTING":p.lastAction?p.lastAction.toUpperCase():"WAIT";
+  const statusColor=isQueued?"#ffd700":isElim?"#ff4444":isFold?"#334466":p.color;
+  const commitName=()=>{if(draft.trim())onRename(p.id,draft.trim());setEditing(false);};
 
   return (
-    <div style={{ position:"absolute", ...pos, width:230,
-      opacity: isElim ? 0.2 : 1, filter: isElim ? "grayscale(1)" : "none",
-      transition:"opacity 0.5s", zIndex: isActive ? 8 : 5 }}>
+    <div style={{position:"absolute",...pos,width:215,
+      opacity:isElim?0.2:1,filter:isElim?"grayscale(1)":"none",
+      transition:"opacity 0.5s",zIndex:isActive?8:5}}>
 
-      {/* active turn glow ring */}
-      {isActive && (
-        <div style={{ position:"absolute", inset:-4, borderRadius:6, zIndex:-1,
+      {isActive&&(
+        <div style={{position:"absolute",inset:-4,borderRadius:6,zIndex:-1,
           border:`2px solid ${p.color}`,
-          boxShadow:`0 0 20px ${p.color}cc, 0 0 40px ${p.color}66, 0 0 60px ${p.color}33`,
-          animation:"turnGlow 0.6s ease-in-out infinite alternate", pointerEvents:"none" }}/>
+          boxShadow:`0 0 20px ${p.color}cc,0 0 40px ${p.color}66,0 0 60px ${p.color}33`,
+          animation:"turnGlow 0.6s ease-in-out infinite alternate",pointerEvents:"none"}}/>
       )}
 
-      {/* ▶ TURN label */}
-      {isActive && (
-        <div style={{ position:"absolute", top:-22, left:"50%", transform:"translateX(-50%)",
-          fontSize:11, letterSpacing:2, color:p.color, fontWeight:"bold",
-          background:"rgba(0,5,15,0.9)", padding:"2px 8px",
-          border:`1px solid ${p.color}66`, borderRadius:3, whiteSpace:"nowrap",
-          boxShadow:`0 0 10px ${p.color}44` }}>
-          ▶ YOUR TURN
-        </div>
-      )}
 
-      <div style={{ background:"rgba(2,8,18,0.97)",
+      <div style={{background:"rgba(2,8,18,0.97)",
         border:`1px solid ${isElim?"#0a1830":isFold?"#1a3050":isActive?p.color+"cc":p.color+"66"}`,
-        borderRadius:4, padding:"12px 14px", position:"relative",
-        boxShadow: isActive ? `0 0 28px ${p.color}40` : "none",
-        transition:"border-color 0.2s, box-shadow 0.2s" }}>
+        borderRadius:4,padding:"12px 14px",position:"relative",
+        boxShadow:isActive?`0 0 28px ${p.color}40`:"none",
+        transition:"border-color 0.2s,box-shadow 0.2s"}}>
 
-        {/* corner accents */}
         {[{top:0,left:0,borderTop:`2px solid ${p.color}`,borderLeft:`2px solid ${p.color}`},
           {bottom:0,right:0,borderBottom:`2px solid ${p.color}`,borderRight:`2px solid ${p.color}`}
-        ].map((s,i) => (
-          <div key={i} style={{ position:"absolute", ...s, width:14, height:14,
-            opacity: isElim?0.1 : isFold?0.25 : isActive?1:0.8 }}/>
+        ].map((s,i)=>(
+          <div key={i} style={{position:"absolute",...s,width:14,height:14,
+            opacity:isElim?0.1:isFold?0.25:isActive?1:0.8}}/>
         ))}
 
         {/* name row */}
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:5, flex:1, minWidth:0 }}>
-            <span style={{ color:p.color, fontSize:17, flexShrink:0 }}>{p.icon}</span>
-            {editing ? (
-              <input autoFocus value={draft}
-                onChange={e => setDraft(e.target.value)}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:5,flex:1,minWidth:0}}>
+            <span style={{color:p.color,fontSize:17,flexShrink:0}}>{p.icon}</span>
+            {editing?(
+              <input autoFocus value={draft} onChange={e=>setDraft(e.target.value)}
                 onBlur={commitName}
-                onKeyDown={e => { if(e.key==="Enter") commitName(); if(e.key==="Escape") setEditing(false); }}
-                style={{ background:"transparent", border:"none",
-                  borderBottom:`1px solid ${p.color}`, color:p.color,
-                  fontSize:14, letterSpacing:2, fontFamily:"inherit",
-                  fontWeight:"bold", outline:"none", width:100 }}/>
-            ) : (
-              <span onClick={() => { setDraft(p.name); setEditing(true); }}
-                title="Click to rename"
-                style={{ color:p.color, fontSize:14, letterSpacing:2, fontWeight:"bold",
-                  cursor:"text", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                onKeyDown={e=>{if(e.key==="Enter")commitName();if(e.key==="Escape")setEditing(false);}}
+                style={{background:"transparent",border:"none",borderBottom:`1px solid ${p.color}`,
+                  color:p.color,fontSize:14,letterSpacing:2,fontFamily:"inherit",
+                  fontWeight:"bold",outline:"none",width:100}}/>
+            ):(
+              <span onClick={()=>{setDraft(p.name);setEditing(true);}} title="Click to rename"
+                style={{color:p.color,fontSize:14,letterSpacing:2,fontWeight:"bold",
+                  cursor:"text",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                 {p.name}
               </span>
             )}
           </div>
-          <div style={{ display:"flex", gap:4, alignItems:"center", flexShrink:0 }}>
-            {p.isCustom && !isElim && (
-              <button onClick={() => onRemove(p.id)}
-                style={{ background:"transparent", border:"none", color:"#ff666688",
-                  cursor:"pointer", fontSize:13, padding:0, lineHeight:1 }}>✕</button>
+          <div style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
+            {p.isCustom&&!isElim&&(
+              <button onClick={()=>onRemove(p.id)}
+                style={{background:"transparent",border:"none",color:"#ff666688",
+                  cursor:"pointer",fontSize:13,padding:0,lineHeight:1}}>✕</button>
             )}
-            <div style={{ fontSize:11, padding:"2px 7px",
-              background:`${p.color}18`, border:`1px solid ${p.color}44`,
-              color: statusColor, letterSpacing:1, fontWeight:"bold" }}>{statusLabel}</div>
+            <div style={{fontSize:11,padding:"2px 7px",
+              background:`${p.color}18`,border:`1px solid ${p.color}44`,
+              color:statusColor,letterSpacing:1,fontWeight:"bold"}}>{statusLabel}</div>
           </div>
         </div>
 
         {/* role */}
-        <div style={{ fontSize:12, color:"#7ab8cc", letterSpacing:1, marginBottom:7 }}>
+        <div style={{fontSize:12,color:"#7ab8cc",letterSpacing:1,marginBottom:7}}>
           {p.role||"Custom Agent"}
-          {p.isCustom && <span style={{ color:"#ffd70044", marginLeft:6 }}>CUSTOM</span>}
+          {p.isCustom&&<span style={{color:"#ffd70044",marginLeft:6}}>CUSTOM</span>}
         </div>
 
         {/* chips */}
-        <div style={{ fontSize:16, color:"#f0cc66", letterSpacing:1, marginBottom:9, fontWeight:"bold" }}>
-          ◈ {p.chips ?? START}
+        <div style={{fontSize:16,color:"#f0cc66",letterSpacing:1,marginBottom:4,fontWeight:"bold"}}>
+          ◈ {p.chips??START}
         </div>
 
+        {/* blinds indicator */}
+        {isDealer&&gameActive&&!isElim&&(
+          <div style={{fontSize:10,color:"#f0cc5588",letterSpacing:2,marginBottom:6}}>DEALER</div>
+        )}
+
         {/* hole cards */}
-        <div style={{ display:"flex", gap:4, marginBottom:6 }}>
-          {gameActive && !isElim ? (
-            p.holeCards?.length===2 ? (
+        <div style={{display:"flex",gap:4,marginBottom:6}}>
+          {gameActive&&!isElim?(
+            p.holeCards?.length===2?(
               showCards
-                ? p.holeCards.map((c,ci) => <Card key={ci} card={c} sm delay={ci*80}/>)
-                : [0,1].map(ci => <Card key={ci} card={null} hidden sm/>)
-            ) : [0,1].map(ci => <Card key={ci} card={null} hidden sm/>)
-          ) : (
-            [0,1].map(ci => <div key={ci} style={{ width:38, height:54, borderRadius:4,
-              border:"1px dashed #1a3050", background:"rgba(0,5,15,0.5)" }}/>)
+                ?p.holeCards.map((c,ci)=><Card key={ci} card={c} sm delay={ci*80}/>)
+                :[0,1].map(ci=><Card key={ci} card={null} hidden sm/>)
+            ):[0,1].map(ci=><Card key={ci} card={null} hidden sm/>)
+          ):(
+            [0,1].map(ci=><div key={ci} style={{width:38,height:54,borderRadius:4,
+              border:"1px dashed #1a3050",background:"rgba(0,5,15,0.5)"}}/>)
           )}
         </div>
 
-        {/* stats row: W L F R */}
-        <div style={{ display:"flex", gap:5, marginBottom:8 }}>
-          {[["W", p.stats?.wins||0,   "#4ade80"],
-            ["L", p.stats?.losses||0, "#ff7766"],
-            ["F", p.stats?.folds||0,  "#7a9ab0"],
-            ["R↑",p.stats?.raises||0, "#f0cc66"]
-          ].map(([lbl,val,col]) => (
-            <div key={lbl} style={{ flex:1, textAlign:"center",
-              background:"rgba(0,15,30,0.7)", borderRadius:3, padding:"4px 2px" }}>
-              <div style={{ fontSize:11, color:"#6090a8", letterSpacing:1 }}>{lbl}</div>
-              <div style={{ fontSize:14, color:col, fontWeight:"bold" }}>{val}</div>
+        {/* stats W L F R */}
+        <div style={{display:"flex",gap:5,marginBottom:8}}>
+          {[["W",p.stats?.wins||0,"#4ade80"],
+            ["L",p.stats?.losses||0,"#ff7766"],
+            ["F",p.stats?.folds||0,"#7a9ab0"],
+            ["R↑",p.stats?.raises||0,"#f0cc66"]
+          ].map(([lbl,val,col])=>(
+            <div key={lbl} style={{flex:1,textAlign:"center",
+              background:"rgba(0,15,30,0.7)",borderRadius:3,padding:"4px 2px"}}>
+              <div style={{fontSize:11,color:"#6090a8",letterSpacing:1}}>{lbl}</div>
+              <div style={{fontSize:14,color:col,fontWeight:"bold"}}>{val}</div>
             </div>
           ))}
         </div>
 
-        {/* thought / thinking */}
-        {!isElim && (
-          <div style={{ borderTop:"1px solid #091828", paddingTop:5, minHeight:20 }}>
-            {p.thinking ? (
-              <div style={{ display:"flex", gap:3, alignItems:"center" }}>
-                <span style={{ fontSize:11, color:"#4a7080", letterSpacing:1 }}>PROCESSING</span>
-                {[0,1,2].map(i => (
-                  <div key={i} style={{ width:4, height:4, borderRadius:"50%",
-                    background:p.color, opacity:0.9,
-                    animation:`pulse 0.9s ${i*0.18}s infinite` }}/>
+        {/* thought */}
+        {!isElim&&(
+          <div style={{borderTop:"1px solid #091828",paddingTop:5,minHeight:20}}>
+            {p.thinking?(
+              <div style={{display:"flex",gap:3,alignItems:"center"}}>
+                <span style={{fontSize:11,color:"#4a7080",letterSpacing:1}}>PROCESSING</span>
+                {[0,1,2].map(i=>(
+                  <div key={i} style={{width:4,height:4,borderRadius:"50%",
+                    background:p.color,opacity:0.9,
+                    animation:`pulse 0.9s ${i*0.18}s infinite`}}/>
                 ))}
               </div>
-            ) : (
-              <div style={{ fontSize:12, color: isFold?"#4a7080":"#88bbcc",
-                fontStyle:"italic", lineHeight:1.4,
-                maxHeight:34, overflow:"hidden" }}>
-                {p.thought ? `"${p.thought}"` : ""}
+            ):(
+              <div style={{fontSize:12,color:isFold?"#4a7080":"#88bbcc",
+                fontStyle:"italic",lineHeight:1.4,maxHeight:34,overflow:"hidden"}}>
+                {p.thought?`"${p.thought}"`:""}
               </div>
             )}
           </div>
         )}
-        {isElim && (
-          <div style={{ fontSize:12, color:"#ff555566", letterSpacing:2, textAlign:"center", marginTop:4 }}>
+        {isElim&&(
+          <div style={{fontSize:12,color:"#ff555566",letterSpacing:2,textAlign:"center",marginTop:4}}>
             TERMINATED
           </div>
         )}
@@ -210,229 +421,236 @@ function AgentPod({ p, pos, gameActive, showCards, onRename, onRemove, isActive,
   );
 }
 
-// ─── AGENT BUILDER PANEL ─────────────────────────────────────────────────────
+// ── Agent Builder Panel ───────────────────────────────────────────────────────
 function AgentBuilder({ custom, setCustom, onDeploy }) {
   return (
-    <div style={{ borderBottom:"1px solid #081e30", padding:16,
-      overflowY:"auto", maxHeight:"65vh",
-      scrollbarWidth:"thin", scrollbarColor:"#0a1e30 transparent" }}>
+    <div style={{borderBottom:"1px solid #081e30",padding:16,
+      overflowY:"auto",maxHeight:"65vh",
+      scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
 
-      <div style={{ fontSize:13, letterSpacing:3, color:"#ffd700", marginBottom:14 }}>◈ DEPLOY CUSTOM AGENT</div>
+      <div style={{fontSize:13,letterSpacing:3,color:"#ffd700",marginBottom:14}}>◈ DEPLOY CUSTOM AGENT</div>
 
-      {/* name */}
-      <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:5 }}>DESIGNATION</div>
-        <input value={custom.name} onChange={e => setCustom(p=>({...p,name:e.target.value}))}
-          style={{ background:"transparent", border:"1px solid #0d2035", color:"#c0d8e8",
-            padding:"6px 10px", width:"100%", fontFamily:"inherit",
-            fontSize:14, letterSpacing:2, boxSizing:"border-box" }}/>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,letterSpacing:2,color:"#6a9aaa",marginBottom:5}}>DESIGNATION</div>
+        <input value={custom.name} onChange={e=>setCustom(p=>({...p,name:e.target.value}))}
+          style={{background:"transparent",border:"1px solid #0d2035",color:"#c0d8e8",
+            padding:"6px 10px",width:"100%",fontFamily:"inherit",
+            fontSize:14,letterSpacing:2,boxSizing:"border-box"}}/>
       </div>
 
-      {/* icon */}
-      <div style={{ marginBottom:5, fontSize:12, color:"#6a9aaa", letterSpacing:2 }}>ICON</div>
-      <div style={{ display:"flex", gap:5, marginBottom:12, flexWrap:"wrap" }}>
-        {ICONS.map(ic => (
-          <button key={ic} onClick={() => setCustom(p=>({...p,icon:ic}))}
-            style={{ background:custom.icon===ic?"rgba(255,215,0,0.14)":"transparent",
+      <div style={{marginBottom:5,fontSize:12,color:"#6a9aaa",letterSpacing:2}}>ICON</div>
+      <div style={{display:"flex",gap:5,marginBottom:12,flexWrap:"wrap"}}>
+        {ICONS.map(ic=>(
+          <button key={ic} onClick={()=>setCustom(p=>({...p,icon:ic}))}
+            style={{background:custom.icon===ic?"rgba(255,215,0,0.14)":"transparent",
               border:`1px solid ${custom.icon===ic?"#ffd700":"#0d2035"}`,
               color:custom.icon===ic?"#ffd700":"#6a8090",
-              width:30, height:30, cursor:"pointer", fontSize:15 }}>{ic}</button>
+              width:30,height:30,cursor:"pointer",fontSize:15}}>{ic}</button>
         ))}
       </div>
 
-      {/* color */}
-      <div style={{ marginBottom:5, fontSize:12, color:"#6a9aaa", letterSpacing:2 }}>COLOR</div>
-      <div style={{ display:"flex", gap:6, marginBottom:14, flexWrap:"wrap" }}>
-        {COLORS.map(c => (
-          <button key={c} onClick={() => setCustom(p=>({...p,color:c}))}
-            style={{ width:24, height:24, background:c, cursor:"pointer", borderRadius:3,
-              border: custom.color===c ? "3px solid #fff" : "2px solid transparent" }}/>
+      <div style={{marginBottom:5,fontSize:12,color:"#6a9aaa",letterSpacing:2}}>COLOR</div>
+      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+        {COLORS.map(c=>(
+          <button key={c} onClick={()=>setCustom(p=>({...p,color:c}))}
+            style={{width:24,height:24,background:c,cursor:"pointer",borderRadius:3,
+              border:custom.color===c?"3px solid #fff":"2px solid transparent"}}/>
         ))}
       </div>
 
-      {/* sliders */}
-      <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:10 }}>BEHAVIORAL PARAMETERS</div>
-      {[["RISK",        "risk",          "#ff6b6b"],
-        ["AGGRESSION",  "aggression",    "#fb923c"],
-        ["BLUFF",       "bluff",         "#ffd93d"],
-        ["PATIENCE",    "patience",      "#34d399"],
-        ["TILT",        "tilt",          "#f472b6"],
-        ["ADAPTABILITY","adaptability",  "#a78bfa"],
-      ].map(([label, key, col]) => (
+      <div style={{fontSize:12,letterSpacing:2,color:"#6a9aaa",marginBottom:10}}>BEHAVIORAL PARAMETERS</div>
+      {[["RISK","risk","#ff6b6b"],["AGGRESSION","aggression","#fb923c"],
+        ["BLUFF","bluff","#ffd93d"],["PATIENCE","patience","#34d399"],
+        ["TILT","tilt","#f472b6"],["ADAPTABILITY","adaptability","#a78bfa"],
+      ].map(([label,key,col])=>(
         <Slider key={key} label={label} value={custom.params[key]} color={col}
-          onChange={val => setCustom(p=>({...p,params:{...p.params,[key]:val}}))}/>
+          onChange={val=>setCustom(p=>({...p,params:{...p.params,[key]:val}}))}/>
       ))}
 
-      {/* style */}
-      {/* <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:7 }}>DECISION STYLE</div>
-        <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
-          {STYLES.map(s => (
-            <button key={s} onClick={() => setCustom(p=>({...p,params:{...p.params,style:s}}))}
-              style={{ background:custom.params.style===s?"rgba(0,245,255,0.1)":"transparent",
-                border:`1px solid ${custom.params.style===s?"#00f5ff44":"#0d2035"}`,
-                color:custom.params.style===s?"#00f5ff":"#6a8898",
-                padding:"5px 10px", cursor:"pointer", fontSize:12, letterSpacing:1, fontFamily:"inherit" }}>
-              {s}
-            </button>
-          ))}
-        </div>
-      </div> */}
-
-      {/* buy-in */}
-      <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:7 }}>BUY-IN CHIPS</div>
-        <div style={{ display:"flex", gap:5 }}>
-          {[500,1000,1500,2000].map(v => (
-            <button key={v} onClick={() => setCustom(p=>({...p,buyIn:v}))}
-              style={{ flex:1, background:custom.buyIn===v?"rgba(255,215,0,0.1)":"transparent",
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,letterSpacing:2,color:"#6a9aaa",marginBottom:7}}>BUY-IN CHIPS</div>
+        <div style={{display:"flex",gap:5}}>
+          {[500,1000,1500,2000].map(v=>(
+            <button key={v} onClick={()=>setCustom(p=>({...p,buyIn:v}))}
+              style={{flex:1,background:custom.buyIn===v?"rgba(255,215,0,0.1)":"transparent",
                 border:`1px solid ${custom.buyIn===v?"#ffd70055":"#0d2035"}`,
                 color:custom.buyIn===v?"#ffd700":"#6a8898",
-                padding:"6px 0", cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>{v}</button>
+                padding:"6px 0",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>{v}</button>
           ))}
         </div>
       </div>
 
-      {/* entry trigger */}
-      <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:7 }}>ENTRY TRIGGER</div>
-        <div style={{ display:"flex", gap:5 }}>
-          {[["NOW","immediate"],["NEXT ROUND","next"]].map(([l,v]) => (
-            <button key={v} onClick={() => setCustom(p=>({...p,entryTrigger:v}))}
-              style={{ flex:1, background:custom.entryTrigger===v?"rgba(0,245,255,0.1)":"transparent",
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,letterSpacing:2,color:"#6a9aaa",marginBottom:7}}>ENTRY TRIGGER</div>
+        <div style={{display:"flex",gap:5}}>
+          {[["NOW","immediate"],["NEXT ROUND","next"]].map(([l,v])=>(
+            <button key={v} onClick={()=>setCustom(p=>({...p,entryTrigger:v}))}
+              style={{flex:1,background:custom.entryTrigger===v?"rgba(0,245,255,0.1)":"transparent",
                 border:`1px solid ${custom.entryTrigger===v?"#00f5ff44":"#0d2035"}`,
                 color:custom.entryTrigger===v?"#00f5ff":"#6a8898",
-                padding:"6px 0", cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>{l}</button>
+                padding:"6px 0",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>{l}</button>
           ))}
         </div>
       </div>
 
-      {/* exit condition — no rounds option */}
-      <div style={{ marginBottom:14 }}>
-        <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:7 }}>EXIT CONDITION</div>
-        <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-          {[["CHIPS BELOW","chips_below"],["CHIPS ABOVE","chips_above"],["MANUAL","manual"]].map(([l,v]) => (
-            <button key={v} onClick={() => setCustom(p=>({...p,exitCondition:v}))}
-              style={{ flex:1, background:custom.exitCondition===v?"rgba(255,100,50,0.1)":"transparent",
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:12,letterSpacing:2,color:"#6a9aaa",marginBottom:7}}>EXIT CONDITION</div>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+          {[["CHIPS BELOW","chips_below"],["CHIPS ABOVE","chips_above"],["MANUAL","manual"]].map(([l,v])=>(
+            <button key={v} onClick={()=>setCustom(p=>({...p,exitCondition:v}))}
+              style={{flex:1,background:custom.exitCondition===v?"rgba(255,100,50,0.1)":"transparent",
                 border:`1px solid ${custom.exitCondition===v?"#ff643244":"#0d2035"}`,
                 color:custom.exitCondition===v?"#ff6432":"#6a8898",
-                padding:"6px 0", cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>{l}</button>
+                padding:"6px 0",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{l}</button>
           ))}
         </div>
-        {custom.exitCondition!=="manual" && (
+        {custom.exitCondition!=="manual"&&(
           <input type="number" value={custom.exitValue}
-            onChange={e => setCustom(p=>({...p,exitValue:Number(e.target.value)}))}
+            onChange={e=>setCustom(p=>({...p,exitValue:Number(e.target.value)}))}
             placeholder="chip threshold"
-            style={{ background:"transparent", border:"1px solid #0d2035", color:"#c0d8e8",
-              padding:"6px 10px", width:"100%", fontFamily:"inherit", marginTop:7,
-              fontSize:13, boxSizing:"border-box" }}/>
+            style={{background:"transparent",border:"1px solid #0d2035",color:"#c0d8e8",
+              padding:"6px 10px",width:"100%",fontFamily:"inherit",marginTop:7,
+              fontSize:13,boxSizing:"border-box"}}/>
         )}
       </div>
 
       <button onClick={onDeploy}
-        style={{ width:"100%", background:"rgba(255,215,0,0.08)",
-          border:"1px solid #ffd70066", color:"#ffd700",
-          padding:"10px 0", cursor:"pointer", fontSize:14,
-          letterSpacing:3, fontFamily:"inherit" }}>◈ DEPLOY</button>
+        style={{width:"100%",background:"rgba(255,215,0,0.08)",
+          border:"1px solid #ffd70066",color:"#ffd700",
+          padding:"10px 0",cursor:"pointer",fontSize:14,
+          letterSpacing:3,fontFamily:"inherit"}}>◈ DEPLOY</button>
     </div>
   );
 }
 
-// ─── POSITIONS — clockwise from top ──────────────────────────────────────────
+// ── Positions clockwise from top ──────────────────────────────────────────────
 function getPositions(n) {
-  if (n <= 4) return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12 — top center
-    { top:"15%",   right:"1%"  },                                 //  2 — top right
-    { bottom:"3%", left:"50%",  transform:"translateX(-50%)" },  //  6 — bottom center
-    { top:"15%",   left:"1%"  },                                  // 10 — top left
+  if (n<=4) return [
+    {top:"2%",left:"50%",transform:"translateX(-50%)"},
+    {top:"12%",right:"1%"},
+    {bottom:"2%",left:"50%",transform:"translateX(-50%)"},
+    {top:"12%",left:"1%"},
   ];
-  if (n === 5) return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12
-    { top:"15%",   right:"1%" },                                  //  2
-    { bottom:"3%", right:"14%"},                                  //  4
-    { bottom:"3%", left:"14%" },                                  //  8
-    { top:"15%",   left:"1%"  },                                  // 10
+  if (n===5) return [
+    {top:"2%",left:"50%",transform:"translateX(-50%)"},
+    {top:"12%",right:"1%"},
+    {bottom:"2%",right:"14%"},
+    {bottom:"2%",left:"14%"},
+    {top:"12%",left:"1%"},
   ];
   return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12
-    { top:"15%",   right:"1%" },                                  //  2
-    { bottom:"3%", right:"1%" },                                  //  4
-    { bottom:"3%", left:"50%", transform:"translateX(-50%)" },   //  6
-    { bottom:"3%", left:"1%"  },                                  //  8
-    { top:"15%",   left:"1%"  },                                  // 10
+    {top:"2%",left:"50%",transform:"translateX(-50%)"},
+    {top:"12%",right:"1%"},
+    {bottom:"2%",right:"1%"},
+    {bottom:"2%",left:"50%",transform:"translateX(-50%)"},
+    {bottom:"2%",left:"1%"},
+    {top:"12%",left:"1%"},
   ];
 }
-// ─── API helpers ─────────────────────────────────────────────────────────────
-const apiPost  = async (url, body) => { try { const r = await fetch(`${API}${url}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); return await r.json(); } catch { return null; } };
-const apiPatch = async (url, body) => { try { await fetch(`${API}${url}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); } catch {} };
 
-// ─── MAIN ────────────────────────────────────────────────────────────────────
+const apiPost  = async(url,body)=>{try{const r=await fetch(`${API}${url}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});return await r.json();}catch{return null;}};
+const apiPatch = async(url,body)=>{try{await fetch(`${API}${url}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}catch{}};
+
+// ── Main Component ────────────────────────────────────────────────────────────
 export default function PokerAgents() {
-  const [players,     setPlayers]     = useState(null);
-  const [community,   setCommunity]   = useState([]);
-  const [pot,         setPot]         = useState(0);
-  const [phase,       setPhase]       = useState("STANDBY");
-  const [logs,        setLogs]        = useState([]);
-  const [running,     setRunning]     = useState(false);
-  const [roundNum,    setRoundNum]    = useState(0);
-  const [gameOver,    setGameOver]    = useState(false);
-  const [champion,    setChampion]    = useState(null);
-  const [showCards,   setShowCards]   = useState(false);
-  const [speed,       setSpeed]       = useState(4000);
-  const [gameId,      setGameId]      = useState(null);
-  const [showBuilder, setShowBuilder] = useState(false);
-  const [agentsList,  setAgentsList]  = useState(DEFAULT_AGENTS);
-  const [pendingAgent,setPendingAgent]= useState(null);
-  const [activeTab,   setActiveTab]   = useState("table");   // "table" | "sessions"
-  const [sessions,    setSessions]    = useState([]);        // list of GameOut
-  const [selSession,  setSelSession]  = useState(null);      // selected session id
-  const [selRounds,   setSelRounds]   = useState([]);        // rounds for selected session
-  const [loadingSess, setLoadingSess] = useState(false);
+  const [players,        setPlayers]        = useState(null);
+  const [community,      setCommunity]      = useState([]);
+  const [pot,            setPot]            = useState(0);
+  const [phase,          setPhase]          = useState("STANDBY");
+  const [logs,           setLogs]           = useState([]);
+  const [running,        setRunning]        = useState(false);
+  const [paused,         setPaused]         = useState(false);
+  const [roundNum,       setRoundNum]       = useState(0);
+  const [gameOver,       setGameOver]       = useState(false);
+  const [champion,       setChampion]       = useState(null);
+  const [showCards,      setShowCards]      = useState(false);
+  const [speed,          setSpeed]          = useState(6000);
+  const [gameId,         setGameId]         = useState(null);
+  const [showBuilder,    setShowBuilder]    = useState(false);
+  const [agentsList,     setAgentsList]     = useState(DEFAULT_AGENTS);
+  const [pendingAgent,   setPendingAgent]   = useState(null);
+  const [activeTab,      setActiveTab]      = useState("table");
+  const [handHistory,    setHandHistory]    = useState([]);
+  const [sessions,       setSessions]       = useState([]);
+  const [selSession,     setSelSession]     = useState(null);
+  const [selRounds,      setSelRounds]      = useState([]);
+  const [loadingSess,    setLoadingSess]    = useState(false);
   const [activePlayerId, setActivePlayerId] = useState(null);
-  const [dealerIdx,   setDealerIdx]   = useState(0);
+  const [dealerIdx,      setDealerIdx]      = useState(0);
+  const [showGlossary,   setShowGlossary]   = useState(false);
+  const [showLLMPanel,   setShowLLMPanel]   = useState(false);
+  // apiKeys: { groq: "gsk_..." }
+  const [apiKeys,        setApiKeys]        = useState(() => {
+    try { return JSON.parse(localStorage.getItem("poker_api_keys")||"{}"); } catch { return {}; }
+  });
+  // agentLLM: { [agentId]: "groq" | null }
+  const [agentLLM,       setAgentLLM]       = useState({ 1: "groq" }); // NOVA defaults to groq
+  const [sbId,           setSbId]           = useState(null);
+  const [bbId,           setBbId]           = useState(null);
+  const [handNum,        setHandNum]        = useState(0);
+
   const [custom, setCustom] = useState({
-    name:"AGENT-X", icon:"◉", color:"#ff6b6b",
-    params:{ risk:50, aggression:50, bluff:30, patience:50, tilt:20, adaptability:50, style:"SHARK" },
-    buyIn:1500, exitCondition:"rounds", exitValue:10, entryTrigger:"next",
+    name:"AGENT-X",icon:"◉",color:"#ff6b6b",
+    params:{risk:50,aggression:50,bluff:30,patience:50,tilt:20,adaptability:50,style:"SHARK"},
+    buyIn:1500,exitCondition:"manual",exitValue:500,entryTrigger:"next",
   });
 
-  const runRef     = useRef(false);
-  const speedRef   = useRef(speed);
-  const logRef     = useRef(null);
-  const pendingRef = useRef(null);
+  const runRef      = useRef(false);
+  const pauseRef    = useRef(false); // true = pause after current hand completes
+  const speedRef    = useRef(speed);
+  const logRef      = useRef(null);
+  const pendingRef  = useRef(null);
+  const removedIdsRef = useRef(new Set()); // ids removed mid-game via handleRemove
+  const apiKeysRef  = useRef(apiKeys);
+  const agentLLMRef = useRef(agentLLM);
 
-  useEffect(() => { speedRef.current = speed; }, [speed]);
-  useEffect(() => { pendingRef.current = pendingAgent; }, [pendingAgent]);
+  useEffect(()=>{speedRef.current=speed;},[speed]);
+  useEffect(()=>{pendingRef.current=pendingAgent;},[pendingAgent]);
+  useEffect(()=>{apiKeysRef.current=apiKeys;},[apiKeys]);
+  useEffect(()=>{agentLLMRef.current=agentLLM;},[agentLLM]);
+
+  const saveApiKey = (provider, key) => {
+    const updated = {...apiKeysRef.current, [provider]: key};
+    setApiKeys(updated);
+    apiKeysRef.current = updated;
+    try { localStorage.setItem("poker_api_keys", JSON.stringify(updated)); } catch {}
+  };
+
+  const setAgentProvider = (agentId, provider) => {
+    const updated = {...agentLLMRef.current, [agentId]: provider||null};
+    setAgentLLM(updated);
+    agentLLMRef.current = updated;
+  };
 
   const addLog = useCallback((entry, color="#8899aa") => {
-    const item = typeof entry === "string"
-      ? { type:"msg", msg:entry, color, id:Date.now()+Math.random() }
-      : { ...entry, id:Date.now()+Math.random() };
-    setLogs(p => [...p.slice(-60), item]);
-    setTimeout(() => { if(logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 40);
-  }, []);
+    const item = typeof entry==="string"
+      ?{type:"msg",msg:entry,color,id:Date.now()+Math.random()}
+      :{...entry,id:Date.now()+Math.random()};
+    setLogs(p=>[...p.slice(-80),item]);
+    setTimeout(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},40);
+  },[]);
 
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
   const initPlayers = useCallback((agents) =>
-    agents.map(a => ({ ...a, chips:a.chips||START, holeCards:[], folded:false,
-      eliminated:false, currentBet:0, thought:"Standby.", thinking:false,
-      lastAction:null, stats:a.stats||{...DEFAULT_STATS} }))
-  , []);
+    agents.map(a=>({...a,chips:a.chips||START,holeCards:[],folded:false,
+      eliminated:false,currentBet:0,thought:"Standby.",thinking:false,
+      lastAction:null,stats:a.stats||{...DEFAULT_STATS}}))
+  ,[]);
 
-  // ── game loop ──────────────────────────────────────────────────────────────
+  // ── Game loop ──────────────────────────────────────────────────────────────
   const runGame = useCallback(async () => {
     if (runRef.current) return;
     runRef.current = true;
-    setRunning(true); setGameOver(false); setChampion(null); setLogs([]); setRoundNum(0);
+    setRunning(true); setGameOver(false); setChampion(null); setLogs([]); setRoundNum(0); setHandNum(0);
 
     let pList = initPlayers(agentsList);
     setPlayers(pList);
     addLog("◈ SYSTEM BOOT — POKER AGENTS INITIALIZED","#00f5ff");
     await sleep(500);
 
-    const gData = await apiPost("/games", {});
-    const gid   = gData?.id || null;
+    const gData = await apiPost("/games",{});
+    const gid   = gData?.id||null;
     setGameId(gid);
     if (gid) addLog(`▸ Session #${gid} opened`,"#1a3a55");
 
@@ -442,810 +660,1409 @@ export default function PokerAgents() {
     while (true) {
       if (!runRef.current) break;
 
+      // apply any mid-game removals (handleRemove called while loop was running)
+      if (removedIdsRef.current.size > 0) {
+        pList = pList.map(p =>
+          removedIdsRef.current.has(p.id) ? {...p, eliminated:true} : p
+        );
+        removedIdsRef.current = new Set(); // clear after applying
+      }
+
       // inject pending custom agent
       const pending = pendingRef.current;
       if (pending) {
-        const enter = pending.entryTrigger==="immediate" || (pending.entryTrigger==="next" && round>0);
+        const enter = pending.entryTrigger==="immediate"||(pending.entryTrigger==="next"&&round>0);
         if (enter) {
-          pList = [...pList, { ...pending, chips:pending.buyIn||1500, holeCards:[],
-            folded:false, eliminated:false, currentBet:0, thought:"Joining...",
-            thinking:false, lastAction:null, stats:{...DEFAULT_STATS} }];
-          setPlayers([...pList]);
-          addLog(`◈ ${pending.name} ENTERS THE TABLE`,"#ffd700");
+          // Only add to pList if not already there (players state already has them as _queued)
+          if (!pList.find(x => x.id === pending.id)) {
+            pList=[...pList,{...pending,chips:pending.buyIn||1500,holeCards:[],
+              folded:false,eliminated:false,currentBet:0,thought:"Joining...",
+              thinking:false,lastAction:null,stats:{...DEFAULT_STATS}}];
+          } else {
+            // Already in pList as _queued — remove the flag so they play normally
+            pList = pList.map(p => p.id===pending.id ? {...p, _queued:false, folded:false, thought:"Ready."} : p);
+          }
+          // Remove _queued flag from React players state too
+          setPlayers(prev => prev ? prev.map(p => p.id===pending.id ? {...p, _queued:false, folded:false, thought:"Ready."} : p) : prev);
           setPendingAgent(null); pendingRef.current=null;
         }
       }
 
-      const active = pList.filter(p => !p.eliminated);
-      if (active.length <= 1) {
-        const w = active[0];
+      const active = pList.filter(p=>!p.eliminated);
+      if (active.length<=1) {
+        const w=active[0];
         setChampion(w); setGameOver(true);
-        addLog(`▶ TOURNAMENT OVER — ${w?.name} DOMINATES`, w?.color||"#00f5ff");
-        if (gid && w) await apiPatch(`/games/${gid}/end`,{winner_name:w.name,total_rounds:round});
+        addLog(`▶ TOURNAMENT OVER — ${w?.name} DOMINATES`,w?.color||"#00f5ff");
+        if (gid&&w) await apiPatch(`/games/${gid}/end`,{winner_name:w.name,total_rounds:round});
         break;
       }
-      if (round > 50) {
-        const w = [...active].sort((a,b) => b.chips-a.chips)[0];
+      if (round>50) {
+        const w=[...active].sort((a,b)=>b.chips-a.chips)[0];
         setChampion(w); setGameOver(true);
         addLog(`▶ MAX ROUNDS — ${w.name} LEADS`,w.color);
         if (gid) await apiPatch(`/games/${gid}/end`,{winner_name:w.name,total_rounds:round});
         break;
       }
 
-      round++;
-      setRoundNum(round);
+      round++; setRoundNum(round);
 
-      // check custom agent exit — remove from agentsList too so counter decrements
-      const exitingIds = [];
-      pList = pList.map(p => {
-        if (!p.isCustom || p.eliminated) return p;
-        if (p.exitCondition==="chips_below" && p.chips<p.exitValue)  { exitingIds.push(p.id); addLog(`◈ ${p.name} EXITS (chips low)`,"#ffd700");  return {...p,eliminated:true}; }
-        if (p.exitCondition==="chips_above" && p.chips>p.exitValue)  { exitingIds.push(p.id); addLog(`◈ ${p.name} EXITS (profit!)`,"#ffd700");   return {...p,eliminated:true}; }
+      // custom agent exit check
+      const exitingIds=[];
+      pList=pList.map(p=>{
+        if (!p.isCustom||p.eliminated) return p;
+        if (p.exitCondition==="chips_below"&&p.chips<p.exitValue){exitingIds.push(p.id);addLog(`◈ ${p.name} EXITS (chips low)`,"#ffd700");return{...p,eliminated:true};}
+        if (p.exitCondition==="chips_above"&&p.chips>p.exitValue){exitingIds.push(p.id);addLog(`◈ ${p.name} EXITS (profit!)`,"#ffd700");return{...p,eliminated:true};}
         return p;
       });
-      if (exitingIds.length > 0) {
-        setAgentsList(prev => prev.filter(a => !exitingIds.includes(a.id)));
-      }
+      if (exitingIds.length>0) setAgentsList(prev=>prev.filter(a=>!exitingIds.includes(a.id)));
 
       let deck = createDeck();
       let comm = [];
-      pList = pList.map(p => ({...p, holeCards:[], folded:p.eliminated, currentBet:0, lastAction:null}));
+      pList = pList.map(p=>({...p,holeCards:[],folded:p.eliminated,currentBet:0,lastAction:null}));
 
-      // seat order is fixed (position in array = seat). active = non-eliminated only.
-      const seatIds = pList.filter(p=>!p.eliminated).map(p=>p.id);
-      if (seatIds.length < 2) break;
+      const seatIds = pList.filter(p=>!p.eliminated && !p._queued).map(p=>p.id);
+      if (seatIds.length<2) break;
 
-      // dealer rotates clockwise each round — dealer button seat index
-      const dealerPos  = (round - 1) % seatIds.length;
-      const sbPos      = (dealerPos + 1) % seatIds.length;
-      const bbPos      = (dealerPos + 2) % seatIds.length;
-      const sbId       = seatIds[sbPos];
-      const bbId       = seatIds[bbPos];
+      // Dealer rotates by finding next seat after last dealer (stable when players join/leave)
+      const lastDealerId = pList.find(p=>p._wasDealer)?.id ?? null;
+      let dealerPos;
+      if (lastDealerId && seatIds.includes(lastDealerId)) {
+        dealerPos = (seatIds.indexOf(lastDealerId) + 1) % seatIds.length;
+      } else {
+        dealerPos = (round-1) % seatIds.length;
+      }
+      // Mark new dealer
+      pList = pList.map(p => ({...p, _wasDealer: p.id === seatIds[dealerPos]}));
 
-      // action order: starts left of BB (pre-flop UTG), clockwise
-      // post-flop: starts left of dealer clockwise
-      const preFlopOrder = [...Array(seatIds.length).keys()]
-        .map(i => seatIds[(bbPos + 1 + i) % seatIds.length]);
-      const postFlopOrder = [...Array(seatIds.length).keys()]
-        .map(i => seatIds[(dealerPos + 1 + i) % seatIds.length]);
+      // Heads-up rule: dealer = SB, other player = BB
+      // 3+ players: SB = dealer+1, BB = dealer+2 (standard)
+      const headsUp = seatIds.length === 2;
+      const sbPos   = headsUp ? dealerPos : (dealerPos+1)%seatIds.length;
+      const bbPos   = headsUp ? (dealerPos+1)%seatIds.length : (dealerPos+2)%seatIds.length;
+      const _sbId   = seatIds[sbPos];
+      const _bbId   = seatIds[bbPos];
+      setSbId(_sbId); setBbId(_bbId);
 
+      // Pre-flop: action starts left of BB (UTG). Heads-up: dealer/SB acts first preflop.
+      // Post-flop: action starts left of dealer (SB in 3+, BB in heads-up).
+      const preFlopOrder = headsUp
+        ? [seatIds[sbPos], seatIds[bbPos]]  // heads-up: SB acts first preflop
+        : [...Array(seatIds.length).keys()].map(i=>seatIds[(bbPos+1+i)%seatIds.length]);
+      const postFlopOrder = headsUp
+        ? [seatIds[bbPos], seatIds[sbPos]]  // heads-up post-flop: BB acts first
+        : [...Array(seatIds.length).keys()].map(i=>seatIds[(dealerPos+1+i)%seatIds.length]);
       setDealerIdx(dealerPos);
 
-      let curPot = SB + BB;
-      pList = pList.map(p => {
-        if (p.id===sbId) return {...p, chips:p.chips-SB, currentBet:SB};
-        if (p.id===bbId) return {...p, chips:p.chips-BB, currentBet:BB};
+      // Post blinds — capped at player chips (short stack all-in blind)
+      const sbPost = Math.min(SB, pList.find(p=>p.id===_sbId)?.chips||0);
+      const bbPost = Math.min(BB, pList.find(p=>p.id===_bbId)?.chips||0);
+      pList = pList.map(p=>{
+        if (p.id===_sbId) return{...p,chips:p.chips-sbPost,currentBet:sbPost};
+        if (p.id===_bbId) return{...p,chips:p.chips-bbPost,currentBet:bbPost};
         return p;
       });
+      let curPot = sbPost + bbPost;
       await sleep(speedRef.current*0.3);
 
       // deal hole cards
-      pList = pList.map(p => p.eliminated||p.folded ? p : {...p, holeCards:[deck.pop(),deck.pop()]});
-      setPlayers([...pList]);
-      setCommunity([]); setPot(curPot); setShowCards(false);
+      pList = pList.map(p=>p.eliminated||p.folded?p:{...p,holeCards:[deck.pop(),deck.pop()]});
+      setPlayers([...pList]); setCommunity([]); setPot(curPot); setShowCards(false);
       await sleep(speedRef.current*0.4);
 
-      const roundActions = [];
+      const roundActions=[];
+
+      // LLM decision cache: 1 call per hand total (prevents 429 on free tier)
+      const llmHandCache = {};
 
       for (const ph of ["PRE-FLOP","FLOP","TURN","RIVER"]) {
         if (!runRef.current) break;
         setPhase(ph);
-
-        if (ph==="FLOP")  { comm=[deck.pop(),deck.pop(),deck.pop()]; }
-        if (ph==="TURN")  { comm=[...comm,deck.pop()]; }
-        if (ph==="RIVER") { comm=[...comm,deck.pop()]; }
-
+        if (ph==="FLOP")  comm=[deck.pop(),deck.pop(),deck.pop()];
+        if (ph==="TURN")  comm=[...comm,deck.pop()];
+        if (ph==="RIVER") comm=[...comm,deck.pop()];
         setCommunity([...comm]);
         await sleep(speedRef.current*0.35);
 
-        let roundMax = Math.max(0, ...pList.filter(p=>!p.folded&&!p.eliminated).map(p=>p.currentBet));
-
-        // clockwise order: pre-flop starts UTG (left of BB), post-flop starts left of dealer
-        const actionOrder = ph === "PRE-FLOP" ? preFlopOrder : postFlopOrder;
-
-        // --- correct poker betting round ---
-        // Each player acts exactly once per street UNLESS someone raises,
-        // in which case everyone who hasn't yet matched gets another action.
-        // We track the "last aggressor" index — when we reach them again, round ends.
-
-        // Build ordered list of active seat ids for this street
-        const streetOrder = actionOrder.filter(id => {
+        // ── Who can still act this street? ──────────────────────────────────
+        // Active = not folded, not eliminated, still has chips OR is all-in but
+        // all-in players CANNOT act — they just wait for showdown.
+        // Only players with chips > 0 AND not folded/eliminated act.
+        const canAct = id => {
           const p = pList.find(x=>x.id===id);
-          return p && !p.eliminated;
-        });
+          return p && !p.folded && !p.eliminated && p.chips > 0;
+        };
 
-        if (streetOrder.length < 2) break;
+        const actionOrder = ph==="PRE-FLOP" ? preFlopOrder : postFlopOrder;
 
-        // index into streetOrder of the player who last raised (null = no raise yet)
-        let lastRaiserIdx = null;
-        // index of the NEXT player to act
-        let cursor = 0;
-        // how many consecutive players have acted without a new raise
-        let actedSinceRaise = 0;
-        const totalSeats = streetOrder.length;
+        // Build ordered list of seat ids for this street (only those who CAN act)
+        const streetSeats = actionOrder.filter(id => canAct(id));
+        if (streetSeats.length < 1) break;
+        // If only one can act and nobody else is all-in contending, skip street
+        const contendingCount = pList.filter(p=>!p.folded&&!p.eliminated).length;
+        if (contendingCount <= 1) break;
 
-        while (true) {
+        // ── Pre-flop special: BB already put in BB chips, but gets option ──
+        // roundMax starts at BB for preflop (blinds already posted)
+        // Pre-flop: roundMax = what BB actually posted (may be less if short-stacked)
+        let roundMax = ph==="PRE-FLOP"
+          ? (pList.find(p=>p.id===_bbId)?.currentBet || BB)
+          : 0;
+        // Minimum raise = last raise increment (starts at BB preflop, 1 chip post-flop)
+        let minRaiseSize = ph==="PRE-FLOP" ? BB : 1;
+
+        // Reset currentBet for post-flop streets
+        if (ph !== "PRE-FLOP") {
+          pList = pList.map(p=>({...p, currentBet:0}));
+          roundMax = 0;
+        }
+
+        // ── Betting loop ─────────────────────────────────────────────────────
+        // We iterate through streetSeats in order, round-robin.
+        // lastAggressorIdx: index in streetSeats of the player who last raised.
+        // When action returns to them (everyone else called/folded), round ends.
+        // Special: pre-flop, BB gets the option even if nobody raised
+        // (BB can raise even if everyone just called).
+
+        let lastAggressorIdx = ph==="PRE-FLOP" ? -1 : -1;
+        // actedThisRound: set of seat ids who have acted since last raise
+        let actedSet = new Set();
+        // Pre-flop: SB and BB have already "acted" by posting — but BB still
+        // gets the option (can raise). So we mark SB as already acted,
+        // but NOT BB.
+        if (ph==="PRE-FLOP") {
+          actedSet.add(_sbId); // SB's forced post counts as their action
+          // BB does NOT get auto-marked — they get the option
+        }
+
+        let seatCursor = 0; // index into streetSeats
+        let loopGuard  = 0; // prevent infinite loop under any circumstances
+        const MAX_ITERS = Math.max(40, streetSeats.length * 20); // enough for multiple re-raises
+
+        while (loopGuard++ < MAX_ITERS) {
           if (!runRef.current) break;
-          const activePlayers = pList.filter(p=>!p.folded&&!p.eliminated);
-          if (activePlayers.length <= 1) break;
 
-          const pid = streetOrder[cursor % totalSeats];
-          const player = pList.find(p=>p.id===pid);
+          // Refresh who can still act (someone may have folded mid-round)
+          const stillCanAct = streetSeats.filter(id => canAct(id));
+          if (stillCanAct.length <= 0) break;
 
-          // skip folded/eliminated without counting as "acted"
-          if (!player || player.folded || player.eliminated) {
-            cursor++;
-            // if everyone remaining has matched and we skipped a full lap, stop
-            actedSinceRaise++;
-            if (actedSinceRaise >= totalSeats) break;
+          // Non-folded, non-eliminated players (including all-in) for pot context
+          const activePot = pList.filter(p=>!p.folded&&!p.eliminated);
+          if (activePot.length <= 1) break;
+
+          const pid = streetSeats[seatCursor % streetSeats.length];
+          seatCursor++;
+
+          // Skip if player can no longer act
+          if (!canAct(pid)) {
+            // If they've gone all-in, mark them as acted so we don't wait for them
+            actedSet.add(pid);
             continue;
           }
 
+          const player = pList.find(p=>p.id===pid);
           const callAmt = Math.max(0, roundMax - player.currentBet);
 
-          // stop condition: this player has already matched AND
-          // nobody raised since they last acted (actedSinceRaise >= active count)
-          if (callAmt === 0 && actedSinceRaise >= activePlayers.length) break;
-
-          // highlight whose turn it is
-          setActivePlayerId(pid);
-          pList = pList.map(p => p.id===pid ? {...p, thinking:true} : p);
-          setPlayers([...pList]);
-          await sleep(speedRef.current*0.35 + Math.random()*200);
-
-          const dec = agentDecide(player, player.holeCards, comm, {
-            pot:curPot, callAmount:callAmt, chips:player.chips,
-            lastActions:pList.map(p=>({action:p.lastAction})),
-            recentLosses:recentLosses[player.name]||0,
+          // ── Termination check ────────────────────────────────────────────
+          // Round ends when every player who can act has acted since the
+          // last aggressive action, AND their bet is equal to roundMax.
+          const everyoneActed = stillCanAct.every(id => {
+            const p = pList.find(x=>x.id===id);
+            if (!p || p.folded || p.eliminated) return true;
+            const theirCallAmt = Math.max(0, roundMax - p.currentBet);
+            return actedSet.has(id) && theirCallAmt === 0;
           });
+          if (everyoneActed) break;
 
-          let potAdd = 0;
-          let up = {...player, thinking:false, thought:dec.thought, lastAction:dec.action};
+          // If this player already acted and owes nothing, skip
+          if (actedSet.has(pid) && callAmt === 0) continue;
 
-          if (dec.action==="fold") {
-            up.folded = true;
-            actedSinceRaise++;
-          } else if (dec.action==="call" || dec.action==="check") {
-            const pay = Math.min(player.chips, callAmt);
-            up.chips = player.chips - pay;
-            up.currentBet = player.currentBet + pay;
-            potAdd = pay;
-            actedSinceRaise++;
-          } else if (dec.action==="raise") {
-            const rt = Math.min(player.chips, dec.amount);
-            up.chips = player.chips - rt;
-            up.currentBet = player.currentBet + rt;
-            potAdd = rt;
-            roundMax = Math.max(roundMax, up.currentBet);
-            // raise reopens action — reset counter, this raiser counts as 1
-            lastRaiserIdx = cursor % totalSeats;
-            actedSinceRaise = 1;
+          // ── Player acts ──────────────────────────────────────────────────
+          setActivePlayerId(pid);
+          pList = pList.map(p=>p.id===pid?{...p,thinking:true}:p);
+          setPlayers([...pList]);
+          await sleep(speedRef.current*0.35 + Math.random()*180);
+
+          let dec;
+          const assignedProvider = agentLLMRef.current[player.id];
+          const hasLLMKey = assignedProvider && !!apiKeysRef.current[assignedProvider];
+
+          if (assignedProvider && hasLLMKey) {
+            // Per-hand cache: call LLM once per hand, reuse decision all streets
+            // This keeps API calls to 1/hand max — safe even on free tier (3 req/min)
+            if (llmHandCache[player.id]) {
+              dec = llmHandCache[player.id];
+            } else {
+              const llmResult = await llmDecide(
+                {...player, llmProvider:assignedProvider},
+                player.holeCards, comm,
+                { pot:curPot, callAmount:callAmt, chips:player.chips,
+                  numOpponents:pList.filter(p=>!p.folded&&!p.eliminated&&p.id!==player.id).length,
+                  phase:ph, round },
+                apiKeysRef.current
+              );
+              if (llmResult && !llmResult._error) {
+                dec = llmResult;
+                llmHandCache[player.id] = llmResult; // cache for rest of hand
+              }
+            }
+            // _rateLimited or any error: silent fallback, no log noise
           }
 
-          pList = pList.map(p => p.id===pid ? up : p);
-          curPot += potAdd;
+          if (!dec) {
+            dec = agentDecide(player, player.holeCards, comm, {
+              pot:curPot, callAmount:callAmt, chips:player.chips,
+              lastActions:pList.map(p=>({action:p.lastAction})),
+              recentLosses:recentLosses[player.name]||0,
+              numOpponents:pList.filter(p=>!p.folded&&!p.eliminated&&p.id!==player.id).length,
+            });
+          }
+
+          // ── Apply decision ────────────────────────────────────────────────
+          let potAdd = 0;
+          let up = { ...player, thinking:false, thought:dec.thought, lastAction:dec.action };
+
+          // ── Validate + fix illegal actions ──────────────────────────────
+          // Free check fix: if agent says "check" but there's a bet to call → call or fold
+          if (dec.action === "check" && callAmt > 0) {
+            dec = { ...dec, action: callAmt <= player.chips * 0.15 ? "call" : "fold",
+              thought: dec.thought + " [auto-corrected]" };
+          }
+          // Prevent folding for free
+          if (dec.action === "fold" && callAmt === 0) {
+            dec = { ...dec, action: "check", thought: dec.thought + " [check instead]" };
+          }
+          // Short-stack: can't cover call → go all-in instead of folding
+          if (dec.action === "call" && callAmt > player.chips) {
+            dec = { ...dec, action: "call", amount: player.chips, thought: "All-in." };
+          }
+
+          if (dec.action === "fold") {
+            up.folded = true;
+            actedSet.add(pid);
+
+          } else if (dec.action === "check") {
+            // callAmt is guaranteed 0 here after validation above
+            actedSet.add(pid);
+
+          } else if (dec.action === "call") {
+            const pay = Math.min(player.chips, callAmt); // all-in if can't cover
+            up.chips       = player.chips - pay;
+            up.currentBet  = player.currentBet + pay;
+            potAdd = pay;
+            actedSet.add(pid);
+            if (up.chips === 0) { up.lastAction = "all-in"; up.folded = false; }
+
+          } else if (dec.action === "raise") {
+            // Enforce minimum raise: must be at least minRaiseSize more than current max
+            const minTotal = roundMax + minRaiseSize; // minimum total bet to be a valid raise
+            const requestedTotal = player.currentBet + Math.min(player.chips, dec.amount);
+            const raiseTotal = Math.min(
+              player.chips,
+              Math.max(dec.amount, minTotal - player.currentBet) // enforce min raise
+            );
+            up.chips      = player.chips - raiseTotal;
+            up.currentBet = player.currentBet + raiseTotal;
+            potAdd = raiseTotal;
+            if (up.currentBet > roundMax) {
+              minRaiseSize = up.currentBet - roundMax; // update min re-raise size
+              roundMax = up.currentBet;
+              actedSet = new Set([pid]); // re-open action
+            } else {
+              // Couldn't meet min raise (short stack) — treat as call
+              up.lastAction = "call";
+              actedSet.add(pid);
+            }
+            if (up.chips === 0) up.lastAction = "all-in";
+          }
+
+          pList    = pList.map(p=>p.id===pid ? up : p);
+          curPot  += potAdd;
           setPot(curPot);
           setPlayers([...pList]);
-          roundActions.push({ agent_name:player.name, action:dec.action, amount:dec.amount||0, thought:dec.thought, hole_cards:player.holeCards, hand_rank:null });
-          await sleep(speedRef.current*0.6);
+          roundActions.push({
+            agent_name: player.name, action: dec.action,
+            amount: dec.action==="raise" ? potAdd : dec.action==="call" ? potAdd : 0,
+            thought: dec.thought,
+            hole_cards: player.holeCards, hand_rank: null, street: ph,
+          });
+          await sleep(speedRef.current*0.55);
 
-          cursor++;
-        } // end while betting round
+        } // end betting while
+
+        // Reset currentBet for next street
+        pList = pList.map(p=>({...p, currentBet:0}));
 
         const stillIn = pList.filter(p=>!p.folded&&!p.eliminated);
-        if (stillIn.length<=1) break;
-      } // end for phase
+        if (stillIn.length <= 1) break;
+      } // end streets for
 
       // showdown
       setPhase("SHOWDOWN"); setShowCards(true); setActivePlayerId(null);
       await sleep(speedRef.current*0.3);
 
-      const contenders = pList.filter(p=>!p.folded&&!p.eliminated);
-      let roundWinner  = contenders[0];
-      let winnerHand   = "—";
-      if (contenders.length > 1) {
-        let best=-1;
-        for (const p of contenders) {
-          const all=[...p.holeCards,...comm];
-          if (all.length>=5) { const s=evaluateHand(all); if(s&&s.value>best){best=s.value;roundWinner=p;winnerHand=s.name;} }
+      const contenders=pList.filter(p=>!p.folded&&!p.eliminated);
+      // Safety: if somehow everyone folded, last non-eliminated player wins
+      const showdownPool = contenders.length > 0
+        ? contenders
+        : pList.filter(p=>!p.eliminated);
+      let roundWinner = showdownPool[0] || pList[0];
+      let winnerHand = "—";
+      if (showdownPool.length > 1) {
+        let best = -1;
+        for (const p of showdownPool) {
+          const all = [...(p.holeCards||[]), ...comm];
+          if (all.length >= 5) {
+            const s = evaluateHand(all);
+            if (s && s.value > best) { best = s.value; roundWinner = p; winnerHand = s.name; }
+          }
         }
-        for (const p of contenders) {
-          const all=[...p.holeCards,...comm];
-          const hr = all.length>=5 ? evaluateHand(all) : {name:"?"};
-          const idx = roundActions.findIndex(a=>a.agent_name===p.name&&!a.hand_rank);
-          if (idx>=0) roundActions[idx].hand_rank=hr.name;
-        }
+      } else if (showdownPool.length === 1) {
+        const p = showdownPool[0];
+        const all = [...(p.holeCards||[]), ...comm];
+        if (all.length >= 5) { const s = evaluateHand(all); if (s) winnerHand = s.name; }
+      }
+      // Annotate hand ranks in actions
+      for (const p of showdownPool) {
+        const all = [...(p.holeCards||[]), ...comm];
+        const hr = all.length >= 5 ? evaluateHand(all) : null;
+        const idx = roundActions.findLastIndex(a=>a.agent_name===p.name);
+        if (idx >= 0) roundActions[idx].hand_rank = hr?.name || "—";
       }
 
+      // ── Side pot calculation ──────────────────────────────────────────────
+      // Each player can only win as much as they put in, times the number of players
+      // who matched that amount. Excess goes to next-best hand.
+      const potContribs = {}; // playerId -> total contributed this hand
+      for (const a of roundActions) {
+        const p = pList.find(x=>x.name===a.agent_name);
+        if (p) potContribs[p.id] = (potContribs[p.id]||0) + (a.amount||0);
+      }
+      // Add blind contributions not in roundActions
+      potContribs[_sbId] = (potContribs[_sbId]||0) + sbPost;
+      potContribs[_bbId] = (potContribs[_bbId]||0) + bbPost;
+
+      // Build side pots: sorted by contribution level
+      const allContribs = Object.entries(potContribs).map(([id,amt])=>({id:Number(id),amt}))
+        .filter(x=>x.amt>0).sort((a,b)=>a.amt-b.amt);
+      let pots = []; // [{amount, eligibleIds}]
+      let prevLevel = 0;
+      for (const {id, amt} of allContribs) {
+        if (amt > prevLevel) {
+          const level = amt;
+          const potSlice = (level - prevLevel) * allContribs.filter(x=>x.amt>=level).length;
+          const eligible = pList.filter(p=>!p.folded&&!p.eliminated&&(potContribs[p.id]||0)>=level).map(p=>p.id);
+          if (potSlice > 0 && eligible.length > 0) pots.push({amount:potSlice, eligibleIds:eligible});
+          prevLevel = level;
+        }
+      }
+      // Any remaining pot amount goes to all non-folded players
+      const totalInPots = pots.reduce((a,p)=>a+p.amount,0);
+      if (curPot > totalInPots) pots.push({amount:curPot-totalInPots, eligibleIds:pList.filter(p=>!p.folded&&!p.eliminated).map(p=>p.id)});
+      if (pots.length === 0) pots = [{amount:curPot, eligibleIds:pList.filter(p=>!p.folded&&!p.eliminated).map(p=>p.id)}];
+
+      // Award each pot to best hand among eligible players
+      const chipsWon = {}; // playerId -> chips won
+      for (const pot of pots) {
+        const eligible = showdownPool.filter(p=>pot.eligibleIds.includes(p.id));
+        if (eligible.length === 0) continue;
+        let potWinner = eligible[0];
+        let best = -1;
+        for (const p of eligible) {
+          const all = [...(p.holeCards||[]), ...comm];
+          if (all.length >= 5) { const s = evaluateHand(all); if (s && s.value > best) { best=s.value; potWinner=p; } }
+        }
+        chipsWon[potWinner.id] = (chipsWon[potWinner.id]||0) + pot.amount;
+      }
+      // If no side pot calc worked, fallback to roundWinner takes all
+      if (Object.keys(chipsWon).length === 0) chipsWon[roundWinner?.id] = curPot;
+
       // update stats + chips
-      pList = pList.map(p => {
-        const isW = p.id===roundWinner?.id;
-        const ns  = {...p.stats};
-        if (isW) ns.wins=(ns.wins||0)+1; else ns.losses=(ns.losses||0)+1;
-        if (p.folded&&!p.eliminated) ns.folds=(ns.folds||0)+1;
-        const myA = roundActions.filter(a=>a.agent_name===p.name);
+      pList=pList.map(p=>{
+        const isW = roundWinner && p.id===roundWinner.id;
+        const ns={...p.stats};
+        if(isW) ns.wins=(ns.wins||0)+1; else if(!p.eliminated) ns.losses=(ns.losses||0)+1;
+        if(p.folded&&!p.eliminated) ns.folds=(ns.folds||0)+1;
+        const myA=roundActions.filter(a=>a.agent_name===p.name);
         ns.raises=(ns.raises||0)+myA.filter(a=>a.action==="raise").length;
-        ns.calls =(ns.calls||0)+myA.filter(a=>a.action==="call"||a.action==="check").length;
-        return { ...p, chips:isW?p.chips+curPot:p.chips, stats:ns };
+        ns.calls=(ns.calls||0)+myA.filter(a=>a.action==="call"||a.action==="check").length;
+        return{...p, chips:p.chips+(chipsWon[p.id]||0), stats:ns};
       });
 
-      for (const p of pList.filter(p=>p.id!==roundWinner?.id&&!p.eliminated)) recentLosses[p.name]=(recentLosses[p.name]||0)+1;
-      if (roundWinner) recentLosses[roundWinner.name]=0;
+      for (const p of pList.filter(p=>p.id!==roundWinner?.id&&!p.eliminated))
+        recentLosses[p.name]=(recentLosses[p.name]||0)+1;
+      if(roundWinner) recentLosses[roundWinner.name]=0;
 
-      // one clean structured entry per round
-      const foldedNames = roundActions.filter(a=>a.action==="fold").map(a=>a.agent_name);
-      addLog({ type:"round", round, winner:roundWinner?.name, winnerColor:roundWinner?.color,
-        winnerIcon:roundWinner?.icon, hand:winnerHand, pot:curPot,
-        folded:foldedNames, community:comm.map(c=>c.rank+c.suit) });
+      const foldedNames=roundActions.filter(a=>a.action==="fold").map(a=>a.agent_name);
+      addLog({type:"round",round,winner:roundWinner?.name,winnerColor:roundWinner?.color,
+        winnerIcon:roundWinner?.icon,hand:winnerHand,pot:curPot,
+        folded:foldedNames,community:comm.map(c=>c.rank+c.suit)});
 
-      pList = pList.map(p => ({...p, eliminated:p.eliminated||p.chips<=0, folded:false, currentBet:0}));
-      setPlayers([...pList]);
-      setPot(0);
+      // ── build hand history record ─────────────────────────────────────────
+      const dealerPlayer = pList.find(p=>p.id===seatIds[dealerPos]);
+      const sbPlayer     = pList.find(p=>p.id===_sbId);
+      const bbPlayer     = pList.find(p=>p.id===_bbId);
+
+      const handRecord = {
+        round,
+        pot: curPot,
+        phase: "SHOWDOWN",
+        winner: roundWinner?.name,
+        winnerColor: roundWinner?.color,
+        winnerIcon: roundWinner?.icon,
+        hand: winnerHand,
+        community: comm.map(c=>c.rank+c.suit),
+        dealer: dealerPlayer?.name,
+        sb: sbPlayer?.name,
+        bb: bbPlayer?.name,
+        players: pList.filter(p=>!p.eliminated||roundActions.some(a=>a.agent_name===p.name)).map(p=>{
+          const myActions = roundActions.filter(a=>a.agent_name===p.name);
+          // group by street
+          const streets = ["PRE-FLOP","FLOP","TURN","RIVER"];
+          const streetActions = myActions.map(a=>({
+            street: a.street||"PRE-FLOP",
+            action: a.action,
+            amount: a.amount||0,
+          }));
+          const lastThought = myActions[myActions.length-1]?.thought||"";
+          const holeCards = p.holeCards?.map(c=>c.rank+c.suit)||[];
+          const hr = p.holeCards?.length>=2 ? evaluateHand([...p.holeCards,...comm])?.name||"" : "";
+          return {
+            name: p.name, icon: p.icon, color: p.color,
+            holeCards, handRank: hr,
+            folded: p.folded||false,
+            won: p.id===roundWinner?.id,
+            streetActions,
+            thought: lastThought,
+          };
+        }),
+      };
+      setHandHistory(prev=>[...prev, handRecord]);
+
+      pList=pList.map(p=>({...p,eliminated:p.eliminated||p.chips<=0,folded:false,currentBet:0}));
+      setPlayers([...pList]); setPot(0);
 
       if (gid) await apiPost(`/games/${gid}/rounds`,{
-        round_number:round, winner_name:roundWinner?.name||"unknown",
-        pot_size:curPot, community_cards:comm, actions:roundActions,
+        round_number:round,winner_name:roundWinner?.name||"unknown",
+        pot_size:curPot,community_cards:comm,actions:roundActions,
       });
 
       await sleep(speedRef.current*0.4);
-    }
 
+      // ── Pause check — only between complete hands ─────────────────────────
+      if (pauseRef.current) {
+        setRunning(false);
+        setPaused(true);
+        addLog("⏸ PAUSED — hand complete. Click RESUME to continue.", "#ff9944");
+        // Wait until unpaused (pauseRef cleared) or stopped (runRef cleared)
+        await new Promise(resolve => {
+          const check = setInterval(() => {
+            // Inject pending agent into local pList (players state already updated)
+            const p = pendingRef.current;
+            if (p && !pList.find(x => x.id === p.id)) {
+              pList=[...pList,{...p,chips:p.buyIn||1500,holeCards:[],
+                folded:false,eliminated:false,currentBet:0,thought:"Joining...",
+                thinking:false,lastAction:null,stats:{...DEFAULT_STATS}}];
+              setPendingAgent(null); pendingRef.current=null;
+            } else if (p) {
+              setPendingAgent(null); pendingRef.current=null; // already added
+            }
+            if (!pauseRef.current || !runRef.current) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 200);
+        });
+        setPaused(false);
+        if (!runRef.current) break; // reset was clicked while paused
+        pauseRef.current = false;
+        setRunning(true);
+        addLog("▶ RESUMED", "#00f5ff");
+      }
+    }
     runRef.current=false; setRunning(false);
-  }, [agentsList, initPlayers, addLog]);
+  },[agentsList,initPlayers,addLog]);
 
   const handleReset = async () => {
-    runRef.current = false;
-    // close current session if it's open and game has rounds
-    if (gameId && roundNum > 0) {
-      const winner = champion?.name || (players ? [...players].sort((a,b)=>b.chips-a.chips)[0]?.name : "unknown");
-      await apiPatch(`/games/${gameId}/end`, { winner_name: winner || "unknown", total_rounds: roundNum });
+    runRef.current=false;
+    pauseRef.current=false;
+    setPaused(false);
+    if (gameId&&roundNum>0) {
+      const winner=champion?.name||(players?[...players].sort((a,b)=>b.chips-a.chips)[0]?.name:"unknown");
+      await apiPatch(`/games/${gameId}/end`,{winner_name:winner||"unknown",total_rounds:roundNum});
     }
-    setRunning(false); setPlayers(null); setLogs([]);
-    setRoundNum(0); setGameOver(false); setChampion(null); setPhase("STANDBY");
-    setCommunity([]); setPot(0); setShowCards(false); setGameId(null);
-    setPendingAgent(null); pendingRef.current=null; setAgentsList(DEFAULT_AGENTS);
+    setRunning(false);setPlayers(null);setLogs([]);setRoundNum(0);setHandNum(0);setHandHistory([]);
+    setGameOver(false);setChampion(null);setPhase("STANDBY");
+    setCommunity([]);setPot(0);setShowCards(false);setGameId(null);
+    setPendingAgent(null);pendingRef.current=null;removedIdsRef.current=new Set();setAgentsList(DEFAULT_AGENTS);
+    setSbId(null);setBbId(null);setActivePlayerId(null);
   };
 
   const loadSessions = async () => {
     setLoadingSess(true);
-    try {
-      const r = await fetch(`${API}/games?limit=50`);
-      const data = await r.json();
-      setSessions(data);
-    } catch {}
+    try{const r=await fetch(`${API}/games?limit=50`);const data=await r.json();setSessions(data);}catch{}
     setLoadingSess(false);
   };
 
   const loadRounds = async (gid) => {
-    setSelSession(gid);
-    setSelRounds([]);
-    try {
-      const r = await fetch(`${API}/games/${gid}/rounds`);
-      const data = await r.json();
-      setSelRounds(data);
-    } catch {}
+    setSelSession(gid); setSelRounds([]);
+    try{const r=await fetch(`${API}/games/${gid}/rounds`);const data=await r.json();setSelRounds(data);}catch{}
   };
 
   const deployCustom = () => {
-    if (customCount >= 2) {
-      addLog("◈ TABLE FULL — max 2 custom agents","#ff4444");
-      setShowBuilder(false);
-      return;
-    }
-    const agent = { ...custom, id:Date.now(), isCustom:true };
-    if (running && custom.entryTrigger==="immediate") {
-      setAgentsList(prev => [...prev, agent]);
-      setPlayers(prev => [...(prev||[]), { ...agent, chips:agent.buyIn||1500, holeCards:[],
-        folded:false, eliminated:false, currentBet:0, thought:"Joining...",
-        thinking:false, lastAction:null, stats:{...DEFAULT_STATS} }]);
-      addLog(`◈ ${agent.name} ENTERS THE TABLE`,"#ffd700");
-    } else if (running) {
-      setAgentsList(prev => [...prev, agent]);
-      setPendingAgent(agent);
-      addLog(`◈ ${agent.name} queued — entering next round`,"#ffd700");
-    } else {
-      // Pre-game: add to agentsList so they sit at table immediately
-      setAgentsList(prev => [...prev, agent]);
+    if (customCount>=2){addLog("◈ TABLE FULL — max 2 custom agents","#ff4444");setShowBuilder(false);return;}
+    const agent={...custom,id:Date.now(),isCustom:true};
+
+    if (!running && !paused) {
+      // Game not started — seat immediately, pod shows as Ready
+      setAgentsList(prev=>[...prev,agent]);
+      setPlayers(prev => {
+        const base = prev || initPlayers(agentsList);
+        return [...base, {...agent, chips:agent.buyIn||1500, holeCards:[], folded:false,
+          eliminated:false, currentBet:0, thought:"Ready.", thinking:false,
+          lastAction:null, stats:{...DEFAULT_STATS}}];
+      });
       addLog(`◈ ${agent.name} seated at table`,"#ffd700");
+    } else {
+      // Game running or paused — always queue for next hand boundary
+      // Pod shows immediately as "NEXT HAND" but agent is NOT in pList yet
+      // Game loop injects at top of next hand iteration via pendingRef
+      setAgentsList(prev=>[...prev,agent]);
+      setPendingAgent(agent);
+      pendingRef.current = agent;
+      // Show pod in UI as queued (no hole cards, thought = waiting)
+      setPlayers(prev => prev ? [...prev, {
+        ...agent, chips:agent.buyIn||1500, holeCards:[], folded:true,
+        eliminated:false, currentBet:0, thought:"Waiting for next hand...",
+        thinking:false, lastAction:"queue", stats:{...DEFAULT_STATS},
+        _queued:true, // flag so game loop knows this pod is display-only
+      }] : prev);
+      addLog(`◈ ${agent.name} queued — joins next hand`,"#ffd700");
     }
     setShowBuilder(false);
   };
 
-  const handleRename = (id, newName) => {
-    setPlayers(prev => prev?.map(p => p.id===id ? {...p,name:newName} : p));
-    setAgentsList(prev => prev.map(a => a.id===id ? {...a,name:newName} : a));
-  };
-
-  const handleRemove = (id) => {
-    setPlayers(prev => prev ? prev.filter(p => p.id !== id) : prev);
-    setAgentsList(prev => prev.filter(a => a.id !== id));
-    // Also cancel if this was the pending agent waiting to enter
-    if (pendingRef.current?.id === id) {
-      setPendingAgent(null);
-      pendingRef.current = null;
-    }
+  const handleRename=(id,n)=>{setPlayers(prev=>prev?.map(p=>p.id===id?{...p,name:n}:p));setAgentsList(prev=>prev.map(a=>a.id===id?{...a,name:n}:a));};
+  const handleRemove=(id)=>{
+    setPlayers(prev=>prev?prev.filter(p=>p.id!==id):prev);
+    setAgentsList(prev=>prev.filter(a=>a.id!==id));
+    if(pendingRef.current?.id===id){setPendingAgent(null);pendingRef.current=null;}
+    removedIdsRef.current.add(id); // signal game loop to eliminate this player
     addLog("◈ Agent removed from table","#ff9944");
   };
 
-  const customCount = agentsList.filter(a => a.isCustom).length;
-  const allPlayers = (players || initPlayers(agentsList)).filter(p => !p.eliminated);
+  const customCount = agentsList.filter(a=>a.isCustom).length;
+  // Merge live players with any custom agents in agentsList not yet in players state
+  const basePlayers = players || initPlayers(agentsList);
+  const allPlayers = basePlayers.filter(p => !p.eliminated);
+  const anyLLMActive = Object.values(agentLLM).some(v=>v) && Object.values(apiKeys).some(v=>v);
 
   return (
-    <div style={{ background:"#020b14", minHeight:"100vh",
-      fontFamily:"'Courier New',monospace", color:"#a0b4c8", overflow:"hidden", position:"relative" }}>
+    <div style={{background:"#020b14",minHeight:"100vh",
+      fontFamily:"'Courier New',monospace",color:"#a0b4c8",overflow:"hidden",position:"relative",display:"flex",flexDirection:"column",height:"100vh"}}>
 
       {/* scanlines */}
-      <div style={{ position:"fixed", inset:0, pointerEvents:"none", zIndex:1,
-        backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px)" }}/>
+      <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:1,
+        backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px)"}}/>
 
       {/* ── HEADER ── */}
-      <div style={{ borderBottom:"1px solid #091e30", padding:"10px 20px",
-        display:"flex", alignItems:"center", justifyContent:"space-between",
-        background:"rgba(0,5,14,0.97)", position:"relative", zIndex:10 }}>
+      <div style={{borderBottom:"1px solid #091e30",padding:"10px 20px",
+        display:"flex",alignItems:"center",justifyContent:"space-between",
+        background:"rgba(0,5,14,0.97)",position:"relative",zIndex:10}}>
 
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          <span style={{ color:"#00f5ff", fontSize:22, letterSpacing:4, fontWeight:"bold" }}>POKER//AGENTS</span>
-          {/* tab switcher */}
-          {[["table","◈ TABLE"],["sessions","◉ SESSIONS"]].map(([tab,label]) => (
-            <button key={tab} onClick={() => { setActiveTab(tab); if(tab==="sessions") loadSessions(); }}
-              style={{ background:activeTab===tab?"rgba(0,245,255,0.1)":"transparent",
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{color:"#00f5ff",fontSize:22,letterSpacing:4,fontWeight:"bold"}}>POKER//AGENTS</span>
+
+          {/* tabs */}
+          {[["table","◈ TABLE"],["sessions","◉ SESSIONS"]].map(([tab,label])=>(
+            <button key={tab} onClick={()=>{setActiveTab(tab);if(tab==="sessions")loadSessions();}}
+              style={{background:activeTab===tab?"rgba(0,245,255,0.1)":"transparent",
                 border:`1px solid ${activeTab===tab?"#00f5ff55":"#0a2030"}`,
                 color:activeTab===tab?"#00f5ff":"#3a6070",
-                padding:"4px 12px", cursor:"pointer", fontSize:12, letterSpacing:2, fontFamily:"inherit" }}>
+                padding:"4px 12px",cursor:"pointer",fontSize:12,letterSpacing:2,fontFamily:"inherit"}}>
               {label}
             </button>
           ))}
-          <span style={{ background:running?"rgba(0,245,255,0.07)":"rgba(255,100,50,0.07)",
+
+          <span style={{background:running?"rgba(0,245,255,0.07)":"rgba(255,100,50,0.07)",
             border:`1px solid ${running?"#00f5ff44":"#ff643244"}`,
-            color:running?"#00f5ff":"#ff6432", fontSize:12, padding:"3px 10px", letterSpacing:2 }}>
+            color:running?"#00f5ff":"#ff6432",fontSize:12,padding:"3px 10px",letterSpacing:2}}>
             {running?"● LIVE":"○ IDLE"}
           </span>
-          {roundNum>0 && <span style={{ color:"#4a8aaa", fontSize:13 }}>RND {roundNum}</span>}
-          {gameId    && <span style={{ color:"#2a5060", fontSize:12 }}>SESSION #{gameId}</span>}
-          {pendingAgent && <span style={{ color:"#ffd700aa", fontSize:12, letterSpacing:1 }}>◈ {pendingAgent.name} QUEUED</span>}
+          {phase!=="STANDBY"&&<span style={{background:`rgba(120,80,200,0.1)`,border:"1px solid #7050c044",
+            color:"#a070e0",fontSize:12,padding:"3px 10px",letterSpacing:2}}>{phase}</span>}
+          {roundNum>0&&<span style={{color:"#4a8aaa",fontSize:13}}>HAND {roundNum}</span>}
+          {handHistory.length>0&&<span style={{color:"#7a9ab0",fontSize:11,
+            background:"rgba(0,245,255,0.05)",border:"1px solid #00f5ff22",padding:"2px 8px",letterSpacing:1}}>
+            {handHistory.length} HANDS PLAYED
+          </span>}
+          {sbId&&<span style={{color:"#fb923c88",fontSize:11}}>SB: {allPlayers.find(p=>p.id===sbId)?.name||"?"}</span>}
+          {bbId&&<span style={{color:"#4ade8088",fontSize:11}}>BB: {allPlayers.find(p=>p.id===bbId)?.name||"?"}</span>}
+          {pendingAgent&&<span style={{color:"#ffd700aa",fontSize:12,letterSpacing:1}}>◈ {pendingAgent.name} QUEUED</span>}
+
+          {/* AI config button */}
+          <button onClick={()=>setShowLLMPanel(v=>!v)}
+            style={{background:anyLLMActive?"rgba(192,132,252,0.12)":showLLMPanel?"rgba(0,245,255,0.08)":"rgba(255,215,0,0.05)",
+              border:`1px solid ${anyLLMActive?"#c084fc55":showLLMPanel?"#00f5ff44":"#ffd70033"}`,
+              color:anyLLMActive?"#c084fc":showLLMPanel?"#00f5ff":"#ffd70088",
+              padding:"3px 10px",cursor:"pointer",fontSize:11,letterSpacing:1,fontFamily:"inherit"}}>
+            {anyLLMActive?"⚙ GROQ: ACTIVE":"⚙ GROQ CONFIG"}
+          </button>
         </div>
 
-        <div style={{ display:"flex", gap:7, alignItems:"center" }}>
-          <span style={{ fontSize:13, color:"#4a7080" }}>SPEED</span>
-          {[["SLOW",6000],["MED",4500],["FAST",2000]].map(([l,v]) => (
-            <button key={l} onClick={() => setSpeed(v)}
-              style={{ background:speed===v?"rgba(0,245,255,0.1)":"transparent",
+        <div style={{display:"flex",gap:7,alignItems:"center"}}>
+          <span style={{fontSize:13,color:"#4a7080"}}>SPEED</span>
+          {[["SLOW",6000],["MED",4500],["FAST",3000]].map(([l,v])=>(
+            <button key={l} onClick={()=>setSpeed(v)}
+              style={{background:speed===v?"rgba(0,245,255,0.1)":"transparent",
                 border:`1px solid ${speed===v?"#00f5ff44":"#0a1e30"}`,
                 color:speed===v?"#00f5ff":"#5a8090",
-                padding:"4px 12px", cursor:"pointer", fontSize:13, letterSpacing:1, fontFamily:"inherit" }}>{l}</button>
+                padding:"4px 12px",cursor:"pointer",fontSize:13,letterSpacing:1,fontFamily:"inherit"}}>{l}</button>
           ))}
-
-          <div style={{ width:1, height:16, background:"#0a1e30", margin:"0 3px" }}/>
-
-          {!running && !gameOver && (
+          <div style={{width:1,height:16,background:"#0a1e30",margin:"0 3px"}}/>
+          {!running&&!paused&&!gameOver&&(
             <button onClick={runGame}
-              style={{ background:"rgba(0,245,255,0.08)", border:"1px solid #00f5ff44",
-                color:"#00f5ff", padding:"6px 18px", cursor:"pointer",
-                fontSize:13, letterSpacing:2, fontFamily:"inherit" }}>▶ RUN</button>
+              style={{background:"rgba(0,245,255,0.08)",border:"1px solid #00f5ff44",
+                color:"#00f5ff",padding:"6px 18px",cursor:"pointer",
+                fontSize:13,letterSpacing:2,fontFamily:"inherit"}}>▶ RUN</button>
           )}
-          {running && (
-            <button onClick={() => { runRef.current=false; setRunning(false); addLog("◈ PAUSED","#ff6644"); }}
-              style={{ background:"rgba(255,100,50,0.08)", border:"1px solid #ff643233",
-                color:"#ff6432", padding:"6px 18px", cursor:"pointer",
-                fontSize:13, letterSpacing:2, fontFamily:"inherit" }}>⏸ PAUSE</button>
+          {running&&!pauseRef.current&&(
+            <button onClick={()=>{ pauseRef.current = true; }}
+              style={{background:"rgba(255,150,50,0.08)",border:"1px solid #ff993333",
+                color:"#ff9933",padding:"6px 18px",cursor:"pointer",
+                fontSize:13,letterSpacing:2,fontFamily:"inherit"}}>⏸ PAUSE AFTER HAND</button>
           )}
-          {(gameOver || (!running && players)) && (
+          {running&&pauseRef.current&&(
+            <button disabled
+              style={{background:"rgba(255,150,50,0.04)",border:"1px solid #ff993322",
+                color:"#ff993366",padding:"6px 18px",cursor:"default",
+                fontSize:13,letterSpacing:2,fontFamily:"inherit"}}>⏸ PAUSING...</button>
+          )}
+          {paused&&(
+            <button onClick={()=>{ pauseRef.current = false; }}
+              style={{background:"rgba(0,245,255,0.08)",border:"1px solid #00f5ff44",
+                color:"#00f5ff",padding:"6px 18px",cursor:"pointer",
+                fontSize:13,letterSpacing:2,fontFamily:"inherit"}}>▶ RESUME</button>
+          )}
+          {(gameOver||(!running&&players))&&(
             <button onClick={handleReset}
-              style={{ background:"rgba(50,50,50,0.1)", border:"1px solid #0a1e30",
-                color:"#667788", padding:"6px 18px", cursor:"pointer",
-                fontSize:13, letterSpacing:2, fontFamily:"inherit" }}>↺ RESET</button>
+              style={{background:"rgba(50,50,50,0.1)",border:"1px solid #0a1e30",
+                color:"#667788",padding:"6px 18px",cursor:"pointer",
+                fontSize:13,letterSpacing:2,fontFamily:"inherit"}}>↺ RESET</button>
           )}
 
-          {/* REVEAL CARDS TOGGLE */}
-          {running && (
-            <button onClick={() => setShowCards(v => !v)}
-              style={{ background:showCards?"rgba(255,215,0,0.12)":"rgba(255,215,0,0.03)",
+          {players&&(
+            <button onClick={()=>setShowCards(v=>!v)}
+              style={{background:showCards?"rgba(255,215,0,0.12)":"rgba(255,215,0,0.03)",
                 border:`1px solid ${showCards?"#ffd70088":"#ffd70022"}`,
                 color:showCards?"#ffd700":"#ffd70055",
-                padding:"6px 14px", cursor:"pointer",
-                fontSize:13, letterSpacing:1, fontFamily:"inherit",
-                transition:"all 0.2s" }}>
-              {showCards ? "🂠 HIDE CARDS" : "🂠 REVEAL CARDS"}
+                padding:"6px 14px",cursor:"pointer",fontSize:13,letterSpacing:1,fontFamily:"inherit",
+                transition:"all 0.2s"}}>
+              {showCards?"🂠 HIDE CARDS":"🂠 REVEAL CARDS"}
             </button>
           )}
-
-          <div style={{ width:1, height:16, background:"#0a1e30", margin:"0 3px" }}/>
-          <button onClick={() => customCount < 2 && setShowBuilder(!showBuilder)}
-            style={{ background:customCount>=2?"rgba(80,0,0,0.1)":showBuilder?"rgba(255,215,0,0.1)":"rgba(255,215,0,0.04)",
+          <div style={{width:1,height:16,background:"#0a1e30",margin:"0 3px"}}/>
+          <button onClick={()=>customCount<2&&setShowBuilder(!showBuilder)}
+            style={{background:customCount>=2?"rgba(80,0,0,0.1)":showBuilder?"rgba(255,215,0,0.1)":"rgba(255,215,0,0.04)",
               border:`1px solid ${customCount>=2?"#ff444444":showBuilder?"#ffd70066":"#ffd70022"}`,
               color:customCount>=2?"#ff6666":showBuilder?"#ffd700":"#ffd70088",
-              padding:"6px 14px", cursor:customCount>=2?"not-allowed":"pointer",
-              fontSize:13, letterSpacing:1, fontFamily:"inherit" }}>
-            {customCount>=2 ? "◈ TABLE FULL" : `+ DEPLOY AGENT (${customCount}/2)`}
+              padding:"6px 14px",cursor:customCount>=2?"not-allowed":"pointer",
+              fontSize:13,letterSpacing:1,fontFamily:"inherit"}}>
+            {customCount>=2?"◈ TABLE FULL":`+ DEPLOY AGENT (${customCount}/2)`}
           </button>
         </div>
       </div>
 
+      {/* API key input dropdown */}
+      {/* ── LLM CONFIG PANEL ── */}
+      {showLLMPanel&&(
+        <div style={{position:"absolute",top:51,left:0,right:0,zIndex:50,
+          background:"rgba(0,3,12,0.99)",borderBottom:"2px solid #0d2035",
+          padding:"16px 24px"}}>
+          <div style={{display:"flex",alignItems:"flex-start",gap:32,flexWrap:"wrap"}}>
+
+            {/* Left: per-agent LLM assignment */}
+            <div style={{minWidth:320}}>
+              <div style={{fontSize:12,letterSpacing:3,color:"#ffd700",marginBottom:12}}>
+                ⚙ ASSIGN AI TO AGENTS
+              </div>
+              <div style={{fontSize:11,color:"#3a5060",marginBottom:10,lineHeight:1.5}}>
+                Choose an LLM provider per agent. If no key is set for a provider,<br/>
+                that agent plays with its built-in hardcoded strategy instead.
+              </div>
+              {DEFAULT_AGENTS.map(agent=>{
+                const assigned = agentLLM[agent.id] || null;
+                return (
+                  <div key={agent.id} style={{display:"flex",alignItems:"center",gap:8,
+                    marginBottom:8,padding:"8px 10px",
+                    background:"rgba(0,10,25,0.7)",border:"1px solid #0a1e30",borderRadius:3}}>
+                    <span style={{color:agent.color,fontSize:15,width:20}}>{agent.icon}</span>
+                    <span style={{fontSize:13,color:agent.color,fontWeight:"bold",
+                      letterSpacing:1,width:70}}>{agent.name}</span>
+                    <span style={{fontSize:11,color:"#3a6070",flex:1}}>{agent.role}</span>
+                    {/* provider buttons */}
+                    <div style={{display:"flex",gap:4}}>
+                      {["groq"].map(prov=>{
+                        const cfg = LLM_PROVIDERS[prov];
+                        const hasKey = !!apiKeys[prov];
+                        const active = assigned===prov;
+                        return (
+                          <button key={prov} onClick={()=>setAgentProvider(agent.id, active?null:prov)}
+                            title={hasKey?`${cfg.label} — key set`:`${cfg.label} — no key`}
+                            style={{padding:"3px 8px",fontSize:11,cursor:"pointer",fontFamily:"inherit",
+                              letterSpacing:1,
+                              background:active?`${cfg.color}22`:"transparent",
+                              border:`1px solid ${active?cfg.color:hasKey?cfg.color+"44":"#1a3040"}`,
+                              color:active?cfg.color:hasKey?cfg.color+"88":"#2a4050",
+                              position:"relative"}}>
+                            "GROQ"
+                            {hasKey&&<span style={{position:"absolute",top:-3,right:-3,
+                              width:6,height:6,borderRadius:"50%",background:cfg.color}}/>}
+                          </button>
+                        );
+                      })}
+                      <button onClick={()=>setAgentProvider(agent.id,null)}
+                        title="Use built-in hardcoded logic"
+                        style={{padding:"3px 8px",fontSize:11,cursor:"pointer",fontFamily:"inherit",
+                          letterSpacing:1,
+                          background:!assigned?"rgba(255,255,255,0.05)":"transparent",
+                          border:`1px solid ${!assigned?"#445566":"#1a3040"}`,
+                          color:!assigned?"#aabbcc":"#334455"}}>
+                        PRESET
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Right: API key inputs per provider */}
+            <div style={{flex:1,minWidth:320}}>
+              <div style={{fontSize:12,letterSpacing:3,color:"#ffd700",marginBottom:12}}>
+                ⚙ API KEYS
+              </div>
+              {Object.entries(LLM_PROVIDERS).map(([provId, cfg])=>(
+                <div key={provId} style={{marginBottom:12}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:cfg.color}}/>
+                    <span style={{fontSize:12,color:cfg.color,letterSpacing:2}}>{cfg.label.toUpperCase()}</span>
+                    {apiKeys[provId]
+                      ? <span style={{fontSize:10,color:"#4ade80",letterSpacing:1}}>● KEY SET</span>
+                      : <span style={{fontSize:10,color:"#ff6644",letterSpacing:1}}>○ NO KEY</span>}
+                  </div>
+                  <div style={{display:"flex",gap:6}}>
+                    <input type="password"
+                      value={apiKeys[provId]||""}
+                      onChange={e=>saveApiKey(provId, e.target.value)}
+                      placeholder={cfg.placeholder}
+                      style={{flex:1,background:"rgba(0,10,25,0.8)",
+                        border:`1px solid ${apiKeys[provId]?cfg.color+"55":"#0d2035"}`,
+                        color:"#c0d8e8",padding:"6px 10px",fontFamily:"inherit",fontSize:12,
+                        outline:"none"}}/>
+                    {apiKeys[provId]&&(
+                      <button onClick={()=>saveApiKey(provId,"")}
+                        style={{background:"transparent",border:"1px solid #ff444433",
+                          color:"#ff6644",padding:"6px 10px",cursor:"pointer",
+                          fontSize:11,fontFamily:"inherit"}}>✕ CLEAR</button>
+                    )}
+                  </div>
+                  <div style={{fontSize:10,color:"#2a4050",marginTop:3,lineHeight:1.4}}>
+                    {provId==="groq"&&"console.groq.com → API Keys → Create API Key (free)"}
+                    
+                  </div>
+                </div>
+              ))}
+            </div>
+
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
+            <button onClick={()=>setShowLLMPanel(false)}
+              style={{background:"rgba(0,245,255,0.06)",border:"1px solid #00f5ff33",
+                color:"#00f5ff",padding:"7px 20px",cursor:"pointer",
+                fontSize:12,letterSpacing:2,fontFamily:"inherit"}}>
+              ✓ DONE
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── BODY ── */}
-      <div style={{ display:"flex", height:"calc(100vh - 51px)" }}>
+      <div style={{display:"flex",height:`calc(100vh - 88px)`}}>
 
-      {activeTab === "table" ? (<>
+      {activeTab==="table"?(<>
 
-        {/* TABLE */}
-        <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-
-          {/* grid */}
-          <div style={{ position:"absolute", inset:0,
+        {/* TABLE AREA */}
+        <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0,display:"flex",flexDirection:"column"}}>
+          <div style={{position:"absolute",inset:0,
             backgroundImage:"linear-gradient(rgba(0,40,80,0.08) 1px,transparent 1px),linear-gradient(90deg,rgba(0,40,80,0.08) 1px,transparent 1px)",
-            backgroundSize:"40px 40px" }}/>
-
-          {/* glow */}
-          <div style={{ position:"absolute", top:"50%", left:"50%",
-            transform:"translate(-50%,-50%)", width:460, height:280,
+            backgroundSize:"40px 40px"}}/>
+          <div style={{position:"absolute",top:"50%",left:"50%",
+            transform:"translate(-50%,-50%)",width:460,height:280,
             background:"radial-gradient(ellipse,rgba(0,30,70,0.5) 0%,transparent 70%)",
-            pointerEvents:"none" }}/>
+            pointerEvents:"none"}}/>
 
           {/* oval table */}
-          <div style={{ position:"absolute", top:"50%", left:"50%",
-            transform:"translate(-50%,-50%)", width:380, height:210,
+          <div style={{position:"absolute",top:"50%",left:"50%",
+            transform:"translate(-50%,-50%)",width:420,height:230,
             borderRadius:"50%",
             background:"radial-gradient(ellipse,#030e1c 0%,#020b14 100%)",
             border:"2px solid #091e34",
-            boxShadow:"0 0 50px rgba(0,30,80,0.4), inset 0 0 35px rgba(0,10,30,0.7)" }}>
+            boxShadow:"0 0 50px rgba(0,30,80,0.4),inset 0 0 35px rgba(0,10,30,0.7)"}}>
 
-            <div style={{ position:"absolute", inset:10, borderRadius:"50%",
-              border:"1px solid rgba(0,60,120,0.2)" }}/>
+            <div style={{position:"absolute",inset:10,borderRadius:"50%",
+              border:"1px solid rgba(0,60,120,0.2)"}}/>
 
-            <div style={{ position:"absolute", top:12, left:"50%",
-              transform:"translateX(-50%)", fontSize:13, letterSpacing:3, color:"#2a6080" }}>
-              {phase}
+            {/* phase + street info */}
+            <div style={{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",
+              textAlign:"center"}}>
+              <div style={{fontSize:13,letterSpacing:3,color:"#2a6080"}}>{phase}</div>
+              {phase!=="STANDBY"&&phase!=="SHOWDOWN"&&(
+                <div style={{fontSize:10,color:"#1a3a50",letterSpacing:1,marginTop:2}}>
+                  {phase==="PRE-FLOP"?"2 hole cards dealt · betting begins":
+                   phase==="FLOP"?"3 community cards · second round":
+                   phase==="TURN"?"4th community card · third round":
+                   phase==="RIVER"?"5th community card · final round":""}
+                </div>
+              )}
             </div>
 
             {/* community cards */}
-            <div style={{ position:"absolute", top:"50%", left:"50%",
-              transform:"translate(-50%,-50%)", display:"flex", gap:5, alignItems:"center" }}>
-              {community.length > 0
-                ? community.map((c,i) => <Card key={i} card={c} delay={i*110}/>)
-                : Array.from({length:5}).map((_,i) => (
-                    <div key={i} style={{ width:44, height:64, borderRadius:6,
-                      border:"1px dashed #091e30", background:"rgba(0,8,20,0.5)" }}/>
-                  ))
+            <div style={{position:"absolute",top:"50%",left:"50%",
+              transform:"translate(-50%,-50%)",display:"flex",gap:5,alignItems:"center"}}>
+              {community.length>0
+                ?community.map((c,i)=><Card key={i} card={c} delay={i*110}/>)
+                :Array.from({length:5}).map((_,i)=>(
+                  <div key={i} style={{width:44,height:64,borderRadius:6,
+                    border:"1px dashed #091e30",background:"rgba(0,8,20,0.5)"}}/>
+                ))
               }
             </div>
 
-            {pot > 0 && (
-              <div style={{ position:"absolute", bottom:22, left:"50%",
-                transform:"translateX(-50%)", fontSize:16, letterSpacing:2, color:"#f0cc55", fontWeight:"bold" }}>
-                POT: {pot}
+            {/* pot */}
+            {pot>0&&(
+              <div style={{position:"absolute",bottom:22,left:"50%",
+                transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+                <div style={{fontSize:16,letterSpacing:2,color:"#f0cc55",fontWeight:"bold"}}>
+                  POT: {pot}
+                </div>
+                <div style={{fontSize:10,color:"#6a5020",letterSpacing:1}}>MAIN POT</div>
               </div>
             )}
           </div>
 
           {/* agent pods */}
-          {allPlayers.map((p, i) => {
-            const activeSeatIds = allPlayers.filter(x=>!x.eliminated).map(x=>x.id);
-            const isDealer = activeSeatIds.length > 0 && activeSeatIds[dealerIdx % activeSeatIds.length] === p.id;
-            return (
-              <AgentPod key={p.id} p={p} pos={getPositions(allPlayers.length)[i] || getPositions(5)[0]}
+          {allPlayers.map((p,i)=>{
+            const activeSeatIds=allPlayers.filter(x=>!x.eliminated).map(x=>x.id);
+            const isDealer=activeSeatIds.length>0&&activeSeatIds[dealerIdx%activeSeatIds.length]===p.id;
+            return(
+              <AgentPod key={p.id} p={p} pos={getPositions(allPlayers.length)[i]||getPositions(5)[0]}
                 gameActive={!!players} showCards={showCards}
-                isActive={activePlayerId === p.id}
+                isActive={activePlayerId===p.id}
                 isDealer={isDealer}
                 onRename={handleRename} onRemove={handleRemove}/>
             );
           })}
-          {allPlayers.length >= 6 && (
-            <div style={{ position:"absolute", bottom:"46%", left:"50%",
-              transform:"translateX(-50%)", fontSize:10, letterSpacing:4,
-              color:"#ff444455", pointerEvents:"none", zIndex:6 }}>
+
+          {allPlayers.length>=6&&(
+            <div style={{position:"absolute",bottom:"46%",left:"50%",
+              transform:"translateX(-50%)",fontSize:10,letterSpacing:4,
+              color:"#ff444455",pointerEvents:"none",zIndex:6}}>
               ◈ TABLE FULL
             </div>
           )}
 
-          {/* GAME OVER */}
-          {gameOver && champion && (
-            <div style={{ position:"absolute", inset:0,
-              background:"rgba(0,3,10,0.9)", display:"flex",
-              alignItems:"center", justifyContent:"center",
-              zIndex:20, backdropFilter:"blur(4px)" }}>
-              <div style={{ textAlign:"center",
+          {/* hand rankings legend */}
+          <div style={{position:"absolute",bottom:8,left:8,
+            background:"rgba(0,5,14,0.85)",border:"1px solid #091e30",
+            borderRadius:4,padding:"8px 12px",fontSize:10,color:"#2a5060",
+            display:"flex",flexDirection:"column",gap:2,zIndex:4}}>
+            <div style={{fontSize:11,color:"#1a4050",letterSpacing:2,marginBottom:4}}>HAND RANKINGS</div>
+            {[["Royal Flush","#ffd700"],["Straight Flush","#f0a020"],["Four of a Kind","#e060e0"],
+              ["Full House","#c040c0"],["Flush","#6090e0"],["Straight","#60b060"],
+              ["Three of a Kind","#6090a0"],["Two Pair","#507080"],["One Pair","#405060"],["High Card","#304050"]
+            ].map(([h,c])=>(
+              <div key={h} style={{display:"flex",alignItems:"center",gap:5}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:c,flexShrink:0}}/>
+                <span style={{color:c}}>{h}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* GAME OVER overlay */}
+          {gameOver&&champion&&(
+            <div style={{position:"absolute",inset:0,
+              background:"rgba(0,3,10,0.9)",display:"flex",
+              alignItems:"center",justifyContent:"center",
+              zIndex:20,backdropFilter:"blur(4px)"}}>
+              <div style={{textAlign:"center",
                 border:`1px solid ${champion.color}`,
-                padding:"38px 55px", background:"rgba(0,5,14,0.99)",
-                boxShadow:`0 0 70px ${champion.color}44` }}>
-                <div style={{ fontSize:9, letterSpacing:4, color:"#1a3050", marginBottom:8 }}>SIMULATION COMPLETE</div>
-                <div style={{ fontSize:36, marginBottom:8 }}>{champion.icon}</div>
-                <div style={{ fontSize:28, letterSpacing:5, color:champion.color, fontWeight:"bold", marginBottom:4 }}>{champion.name}</div>
-                <div style={{ fontSize:10, color:"#445566", letterSpacing:2, marginBottom:10 }}>{champion.role}</div>
-                <div style={{ fontSize:15, color:"#e8c050", marginBottom:6 }}>◈ {champion.chips}</div>
-                <div style={{ display:"flex", gap:14, justifyContent:"center", fontSize:9, color:"#445566", marginBottom:18 }}>
+                padding:"38px 55px",background:"rgba(0,5,14,0.99)",
+                boxShadow:`0 0 70px ${champion.color}44`}}>
+                <div style={{fontSize:9,letterSpacing:4,color:"#1a3050",marginBottom:8}}>SIMULATION COMPLETE</div>
+                <div style={{fontSize:36,marginBottom:8}}>{champion.icon}</div>
+                <div style={{fontSize:28,letterSpacing:5,color:champion.color,fontWeight:"bold",marginBottom:4}}>{champion.name}</div>
+                <div style={{fontSize:11,color:"#445566",letterSpacing:2,marginBottom:3}}>{champion.role}</div>
+                <div style={{fontSize:15,color:"#e8c050",marginBottom:6}}>◈ {champion.chips}</div>
+                <div style={{display:"flex",gap:14,justifyContent:"center",fontSize:9,color:"#445566",marginBottom:18}}>
                   <span>W: {champion.stats?.wins||0}</span>
                   <span>L: {champion.stats?.losses||0}</span>
                   <span>R↑: {champion.stats?.raises||0}</span>
                 </div>
                 <button onClick={handleReset}
-                  style={{ background:`${champion.color}14`, border:`1px solid ${champion.color}`,
-                    color:champion.color, padding:"9px 28px", cursor:"pointer",
-                    fontSize:11, letterSpacing:3, fontFamily:"inherit" }}>↺ RUN AGAIN</button>
+                  style={{background:`${champion.color}14`,border:`1px solid ${champion.color}`,
+                    color:champion.color,padding:"9px 28px",cursor:"pointer",
+                    fontSize:11,letterSpacing:3,fontFamily:"inherit"}}>↺ RUN AGAIN</button>
               </div>
             </div>
           )}
 
           {/* idle state */}
-          {!players && !running && (
-            <div style={{ position:"absolute", inset:0,
-              display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none" }}>
-              <div style={{ textAlign:"center" }}>
-                <div style={{ fontSize:9, letterSpacing:4, color:"#0a1e30", marginBottom:5 }}>SYSTEM READY</div>
-                <div style={{ fontSize:9, letterSpacing:2, color:"#071525" }}>PRESS RUN TO INITIALIZE AGENTS</div>
+          {!players&&!running&&(
+            <div style={{position:"absolute",inset:0,
+              display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:9,letterSpacing:4,color:"#0a1e30",marginBottom:5}}>SYSTEM READY</div>
+                <div style={{fontSize:9,letterSpacing:2,color:"#071525"}}>PRESS RUN TO INITIALIZE AGENTS</div>
               </div>
             </div>
           )}
         </div>
 
         {/* ── RIGHT PANEL ── */}
-        <div style={{ width:290, borderLeft:"1px solid #091e30",
-          display:"flex", flexDirection:"column", background:"rgba(0,3,12,0.95)" }}>
+        <div style={{width:300,borderLeft:"1px solid #091e30",
+          display:"flex",flexDirection:"column",background:"rgba(0,3,12,0.95)"}}>
 
-          {showBuilder && (
-            <AgentBuilder custom={custom} setCustom={setCustom} onDeploy={deployCustom}/>
-          )}
+          {showBuilder&&<AgentBuilder custom={custom} setCustom={setCustom} onDeploy={deployCustom}/>}
 
           {/* log header */}
-          <div style={{ padding:"10px 14px", borderBottom:"1px solid #091e30",
-            fontSize:13, letterSpacing:3, color:"#3a7a90",
-            display:"flex", justifyContent:"space-between" }}>
+          <div style={{padding:"10px 14px",borderBottom:"1px solid #091e30",
+            fontSize:13,letterSpacing:3,color:"#3a7a90",
+            display:"flex",justifyContent:"space-between"}}>
             <span>MISSION LOG</span>
-            <span style={{ color:"#2a5060" }}>{logs.length}</span>
+            <span style={{color:"#2a5060"}}>{logs.length}</span>
           </div>
 
           {/* log entries */}
-          <div ref={logRef} style={{ flex:1, overflowY:"auto", padding:"8px 10px",
-            scrollbarWidth:"thin", scrollbarColor:"#0a1e30 transparent" }}>
-            {logs.map(e => e.type === "round" ? (
-              <div key={e.id} style={{ marginBottom:10, border:`1px solid ${e.winnerColor}33`,
-                borderLeft:`3px solid ${e.winnerColor}`, borderRadius:4,
-                background:"rgba(0,8,20,0.7)", padding:"9px 11px" }}>
-                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
-                  <span style={{ fontSize:11, color:"#3a6878", letterSpacing:2 }}>ROUND {e.round}</span>
-                  <span style={{ fontSize:13, color:"#f0cc55", fontWeight:"bold" }}>◈ {e.pot}</span>
+          <div ref={logRef} style={{flex:1,overflowY:"auto",padding:"8px 10px",
+            scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+            {logs.map(e=>e.type==="round"?(
+              <div key={e.id} style={{marginBottom:10,border:`1px solid ${e.winnerColor}33`,
+                borderLeft:`3px solid ${e.winnerColor}`,borderRadius:4,
+                background:"rgba(0,8,20,0.7)",padding:"9px 11px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                  <span style={{fontSize:11,color:"#3a6878",letterSpacing:2}}>ROUND {e.round}</span>
+                  <span style={{fontSize:13,color:"#f0cc55",fontWeight:"bold"}}>◈ {e.pot}</span>
                 </div>
-                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
-                  <span style={{ fontSize:18 }}>{e.winnerIcon}</span>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:15, color:e.winnerColor, fontWeight:"bold", letterSpacing:1 }}>{e.winner}</div>
-                    {e.hand !== "—" && <div style={{ fontSize:12, color:"#7ad0a0" }}>{e.hand}</div>}
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                  <span style={{fontSize:18}}>{e.winnerIcon}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:15,color:e.winnerColor,fontWeight:"bold",letterSpacing:1}}>{e.winner}</div>
+                    {e.hand!=="—"&&<div style={{fontSize:12,color:"#7ad0a0"}}>{e.hand}</div>}
                   </div>
-                  <span style={{ fontSize:13, color:"#4ade80", fontWeight:"bold",
-                    background:"rgba(74,222,128,0.1)", padding:"2px 8px",
-                    border:"1px solid #4ade8033", borderRadius:3 }}>WIN</span>
+                  <span style={{fontSize:13,color:"#4ade80",fontWeight:"bold",
+                    background:"rgba(74,222,128,0.1)",padding:"2px 8px",
+                    border:"1px solid #4ade8033",borderRadius:3}}>WIN</span>
                 </div>
-                {e.community?.length > 0 && (
-                  <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginBottom:5 }}>
-                    {e.community.map((c,i) => {
-                      const red = c.includes("♥")||c.includes("♦");
-                      return <span key={i} style={{ fontSize:12, color:red?"#ff8899":"#90b8e0",
-                        background:"rgba(0,15,35,0.9)", padding:"2px 6px",
-                        border:`1px solid ${red?"#ff446633":"#335577"}`, borderRadius:3 }}>{c}</span>;
+                {e.community?.length>0&&(
+                  <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:5}}>
+                    {e.community.map((c,i)=>{
+                      const red=c.includes("♥")||c.includes("♦");
+                      return<span key={i} style={{fontSize:12,color:red?"#ff8899":"#90b8e0",
+                        background:"rgba(0,15,35,0.9)",padding:"2px 6px",
+                        border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:3}}>{c}</span>;
                     })}
                   </div>
                 )}
-                {e.folded?.length > 0 && (
-                  <div style={{ fontSize:11, color:"#4a7080" }}>
-                    folded: {e.folded.join(", ")}
-                  </div>
+                {e.folded?.length>0&&(
+                  <div style={{fontSize:11,color:"#4a7080"}}>folded: {e.folded.join(", ")}</div>
                 )}
               </div>
-            ) : (
-              <div key={e.id} style={{ padding:"4px 6px", fontSize:13, lineHeight:1.5,
-                color:e.color, marginBottom:2 }}>
-                {e.msg}
-              </div>
+            ):(
+              <div key={e.id} style={{padding:"4px 6px",fontSize:13,lineHeight:1.5,
+                color:e.color,marginBottom:2}}>{e.msg}</div>
             ))}
-            {!logs.length && (
-              <div style={{ padding:"14px 6px", fontSize:13, color:"#2a4a5a", letterSpacing:2 }}>
+            {!logs.length&&(
+              <div style={{padding:"14px 6px",fontSize:13,color:"#2a4a5a",letterSpacing:2}}>
                 AWAITING SIGNAL...
               </div>
             )}
           </div>
 
-          {/* agents legend */}
-          <div style={{ borderTop:"1px solid #091e30", padding:"10px 14px" }}>
-            <div style={{ fontSize:12, letterSpacing:3, color:"#3a6070", marginBottom:8 }}>AGENTS ONLINE</div>
-            {allPlayers.filter(p=>!p.eliminated).map(p => (
-              <div key={p.id} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
-                <span style={{ color:p.color, fontSize:15 }}>{p.icon}</span>
-                <span style={{ color:p.color, fontSize:13, letterSpacing:1 }}>{p.name}</span>
-                <span style={{ color:"#3a6070", fontSize:12, marginLeft:"auto" }}>◈{p.chips??START}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-      </>) : (
-
-        /* ── SESSIONS TAB ── */
-        <div style={{ flex:1, display:"flex", overflow:"hidden", fontFamily:"'Courier New',monospace" }}>
-
-          {/* LEFT: session list */}
-          <div style={{ width:320, borderRight:"1px solid #091e30", overflowY:"auto",
-            background:"rgba(0,3,12,0.98)", scrollbarWidth:"thin", scrollbarColor:"#0a1e30 transparent" }}>
-            <div style={{ padding:"14px 16px", borderBottom:"1px solid #091e30",
-              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <span style={{ fontSize:14, letterSpacing:3, color:"#3a7a90" }}>ALL SESSIONS</span>
-              <button onClick={loadSessions}
-                style={{ background:"transparent", border:"1px solid #0a2030", color:"#3a6070",
-                  padding:"3px 10px", cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>
-                ↻ REFRESH
-              </button>
-            </div>
-            {loadingSess && (
-              <div style={{ padding:20, fontSize:13, color:"#2a5060", letterSpacing:2 }}>LOADING...</div>
-            )}
-            {!loadingSess && sessions.length === 0 && (
-              <div style={{ padding:20, fontSize:13, color:"#2a4a5a", letterSpacing:2 }}>NO SESSIONS YET</div>
-            )}
-            {sessions.map(s => {
-              const isSel = selSession === s.id;
-              const isOpen = !s.ended_at;
-              const date = new Date(s.started_at).toLocaleDateString("en-US",{month:"short",day:"numeric"});
-              const time = new Date(s.started_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit"});
-              return (
-                <div key={s.id} onClick={() => loadRounds(s.id)}
-                  style={{ padding:"12px 16px", cursor:"pointer", borderBottom:"1px solid #091e30",
-                    background: isSel ? "rgba(0,245,255,0.05)" : "transparent",
-                    borderLeft: isSel ? "3px solid #00f5ff" : "3px solid transparent",
-                    transition:"all 0.15s" }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
-                    <span style={{ fontSize:14, color: isSel?"#00f5ff":"#7ab8cc", fontWeight:"bold" }}>
-                      SESSION #{s.id}
+          {/* ── TABLE POSITIONS WIDGET ── */}
+          {running && (
+            <div style={{borderTop:"1px solid #091e30",padding:"10px 14px",
+              background:"rgba(0,5,18,0.95)"}}>
+              <div style={{fontSize:11,letterSpacing:3,color:"#3a6070",marginBottom:8}}>TABLE POSITIONS</div>
+              {allPlayers.filter(p=>!p.eliminated).map(p=>{
+                const activeSeatIds = allPlayers.filter(x=>!x.eliminated).map(x=>x.id);
+                const isDealer = activeSeatIds[dealerIdx % activeSeatIds.length] === p.id;
+                const isSB     = p.id === sbId;
+                const isBB     = p.id === bbId;
+                const badges   = [];
+                if (isDealer) badges.push({lbl:"DEALER",color:"#f0cc55",bg:"rgba(240,204,85,0.12)"});
+                if (isSB)     badges.push({lbl:"SB",color:"#fb923c",bg:"rgba(251,146,60,0.12)"});
+                if (isBB)     badges.push({lbl:"BB",color:"#4ade80",bg:"rgba(74,222,128,0.12)"});
+                const assignedProv = agentLLM[p.id];
+                const provCfg = assignedProv ? LLM_PROVIDERS[assignedProv] : null;
+                const hasKey  = provCfg && !!apiKeys[assignedProv];
+                return (
+                  <div key={p.id} style={{display:"flex",alignItems:"center",gap:6,
+                    marginBottom:6,padding:"5px 8px",borderRadius:3,
+                    background: activePlayerId===p.id?`${p.color}0e`:"transparent",
+                    border:`1px solid ${activePlayerId===p.id?p.color+"33":"transparent"}`,
+                    transition:"all 0.2s"}}>
+                    <span style={{color:p.color,fontSize:14,flexShrink:0}}>{p.icon}</span>
+                    <span style={{fontSize:12,color:p.color,fontWeight:"bold",letterSpacing:1,
+                      flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {p.name}
                     </span>
-                    <span style={{ fontSize:11, color: isOpen?"#fb923c":"#4ade80" }}>
-                      {isOpen ? "● OPEN" : "● DONE"}
-                    </span>
-                  </div>
-                  <div style={{ fontSize:12, color:"#3a6878", marginBottom:3 }}>{date} {time}</div>
-                  <div style={{ display:"flex", gap:12 }}>
-                    <span style={{ fontSize:12, color:"#5a8090" }}>
-                      {s.total_rounds} rounds
-                    </span>
-                    {s.winner_name && (
-                      <span style={{ fontSize:12, color:"#f0cc55" }}>
-                        ▶ {s.winner_name}
+                    {/* position badges */}
+                    <div style={{display:"flex",gap:3,flexShrink:0}}>
+                      {badges.map(b=>(
+                        <span key={b.lbl} style={{fontSize:10,padding:"1px 5px",
+                          background:b.bg,border:`1px solid ${b.color}55`,
+                          color:b.color,letterSpacing:1,borderRadius:2,fontWeight:"bold"}}>
+                          {b.lbl}
+                        </span>
+                      ))}
+                    </div>
+                    {/* LLM badge */}
+                    {provCfg && (
+                      <span style={{fontSize:9,padding:"1px 4px",
+                        background:`${provCfg.color}18`,
+                        border:`1px solid ${hasKey?provCfg.color+"55":"#1a3040"}`,
+                        color:hasKey?provCfg.color:"#2a4050",letterSpacing:1,borderRadius:2}}>
+                        "GROQ"
+                        {hasKey?"":"?"}
                       </span>
                     )}
+                    <span style={{fontSize:11,color:"#f0cc55",flexShrink:0}}>◈{p.chips}</span>
                   </div>
+                );
+              })}
+              {/* blinds info */}
+              {(sbId||bbId) && (
+                <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid #091428",
+                  display:"flex",gap:10,flexWrap:"wrap"}}>
+                  <div style={{fontSize:11,color:"#3a5060"}}>
+                    <span style={{color:"#fb923c",fontWeight:"bold"}}>SB </span>
+                    {allPlayers.find(p=>p.id===sbId)?.name||"—"}
+                    <span style={{color:"#fb923c44",marginLeft:4}}>◈{SB}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"#3a5060"}}>
+                    <span style={{color:"#4ade80",fontWeight:"bold"}}>BB </span>
+                    {allPlayers.find(p=>p.id===bbId)?.name||"—"}
+                    <span style={{color:"#4ade8044",marginLeft:4}}>◈{BB}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"#3a5060"}}>
+                    <span style={{color:"#f0cc55",fontWeight:"bold"}}>DEALER </span>
+                    {allPlayers.filter(p=>!p.eliminated)[dealerIdx % Math.max(1,allPlayers.filter(p=>!p.eliminated).length)]?.name||"—"}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* agents legend (pre-game / always visible) */}
+          <div style={{borderTop:"1px solid #091e30",padding:"10px 14px"}}>
+            <div style={{fontSize:11,letterSpacing:3,color:"#3a6070",marginBottom:8}}>AGENTS</div>
+            {allPlayers.map(p=>{
+              const assignedProv = agentLLM[p.id];
+              const provCfg = assignedProv ? LLM_PROVIDERS[assignedProv] : null;
+              const hasKey  = provCfg && !!apiKeys[assignedProv];
+              return (
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:7,marginBottom:6}}>
+                  <span style={{color:p.color,fontSize:14}}>{p.icon}</span>
+                  <span style={{fontSize:12,color:p.eliminated?"#2a4050":p.color,
+                    flex:1,letterSpacing:1,fontWeight:"bold"}}>{p.name}</span>
+                  {provCfg?(
+                    <span style={{fontSize:9,padding:"1px 5px",letterSpacing:1,
+                      background:`${provCfg.color}18`,borderRadius:2,
+                      border:`1px solid ${hasKey?provCfg.color+"44":"#1a3040"}`,
+                      color:hasKey?provCfg.color:"#2a4050"}}>
+                      "GROQ"
+                      {!hasKey&&" (no key)"}
+                    </span>
+                  ):(
+                    <span style={{fontSize:9,color:"#2a4050",letterSpacing:1}}>PRESET</span>
+                  )}
+                  <span style={{fontSize:11,color:"#f0cc55"}}>◈{p.chips||START}</span>
                 </div>
               );
             })}
           </div>
+        </div>
 
-          {/* RIGHT: rounds for selected session */}
-          <div style={{ flex:1, overflowY:"auto", background:"rgba(0,5,14,0.97)",
-            scrollbarWidth:"thin", scrollbarColor:"#0a1e30 transparent" }}>
-            {!selSession ? (
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"center",
-                height:"100%", fontSize:14, color:"#1a4050", letterSpacing:3 }}>
-                ← SELECT A SESSION
-              </div>
-            ) : selRounds.length === 0 ? (
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"center",
-                height:"100%", fontSize:14, color:"#1a4050", letterSpacing:3 }}>
-                NO ROUNDS RECORDED
-              </div>
-            ) : (
-              <div style={{ padding:20 }}>
-                {/* session header */}
-                {(() => {
-                  const s = sessions.find(x=>x.id===selSession);
-                  return s ? (
-                    <div style={{ marginBottom:20, paddingBottom:16, borderBottom:"1px solid #091e30" }}>
-                      <div style={{ fontSize:18, color:"#00f5ff", fontWeight:"bold", letterSpacing:3, marginBottom:6 }}>
-                        SESSION #{s.id}
-                      </div>
-                      <div style={{ display:"flex", gap:24 }}>
-                        <div>
-                          <div style={{ fontSize:11, color:"#3a6070", letterSpacing:2 }}>STARTED</div>
-                          <div style={{ fontSize:13, color:"#7ab8cc" }}>
-                            {new Date(s.started_at).toLocaleString()}
-                          </div>
-                        </div>
-                        <div>
-                          <div style={{ fontSize:11, color:"#3a6070", letterSpacing:2 }}>ROUNDS</div>
-                          <div style={{ fontSize:13, color:"#7ab8cc" }}>{selRounds.length}</div>
-                        </div>
-                        {s.winner_name && (
-                          <div>
-                            <div style={{ fontSize:11, color:"#3a6070", letterSpacing:2 }}>CHAMPION</div>
-                            <div style={{ fontSize:13, color:"#f0cc55", fontWeight:"bold" }}>{s.winner_name}</div>
-                          </div>
-                        )}
-                        <div>
-                          <div style={{ fontSize:11, color:"#3a6070", letterSpacing:2 }}>TOTAL POT</div>
-                          <div style={{ fontSize:13, color:"#f0cc55" }}>
-                            ◈ {selRounds.reduce((acc,r)=>acc+r.pot_size,0)}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : null;
-                })()}
+      </>):(
+        /* ── SESSIONS TAB ── */
+        <div style={{flex:1,display:"flex",overflow:"hidden"}}>
 
-                {/* round cards grid */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))", gap:12 }}>
-                  {selRounds.map(r => {
-                    // find unique agents that played this round
-                    const agents = [...new Set((r.actions||[]).map(a=>a.agent_name))];
-                    const folded = (r.actions||[]).filter(a=>a.action==="fold").map(a=>a.agent_name);
-                    const winner = r.winner_name;
-                    const winnerAction = (r.actions||[]).find(a=>a.agent_name===winner && a.hand_rank);
-                    const community = r.community_cards || [];
-                    return (
-                      <div key={r.id} style={{ background:"rgba(0,8,22,0.9)",
-                        border:"1px solid #0a2535", borderRadius:6, padding:"14px 16px",
-                        borderTop:`3px solid #00f5ff33` }}>
-                        {/* round header */}
-                        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10 }}>
-                          <span style={{ fontSize:13, color:"#3a7888", letterSpacing:2 }}>ROUND {r.round_number}</span>
-                          <span style={{ fontSize:14, color:"#f0cc55", fontWeight:"bold" }}>◈ {r.pot_size}</span>
-                        </div>
-                        {/* winner */}
-                        <div style={{ background:"rgba(0,245,255,0.04)", border:"1px solid #00f5ff22",
-                          borderRadius:4, padding:"8px 10px", marginBottom:10 }}>
-                          <div style={{ fontSize:11, color:"#3a7888", letterSpacing:2, marginBottom:3 }}>WINNER</div>
-                          <div style={{ fontSize:16, color:"#00f5ff", fontWeight:"bold" }}>{winner}</div>
-                          {winnerAction?.hand_rank && (
-                            <div style={{ fontSize:12, color:"#7ad0a0", marginTop:2 }}>{winnerAction.hand_rank}</div>
-                          )}
-                        </div>
-                        {/* community cards */}
-                        {community.length > 0 && (
-                          <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginBottom:10 }}>
-                            {community.map((c,i) => {
-                              const card = typeof c === "string" ? c : (c?.rank||"")+(c?.suit||"");
-                              const red  = card.includes("♥")||card.includes("♦");
-                              return (
-                                <span key={i} style={{ fontSize:13, color:red?"#ff8899":"#90b8e0",
-                                  background:"rgba(0,15,35,0.9)", padding:"3px 7px",
-                                  border:`1px solid ${red?"#ff446633":"#335577"}`, borderRadius:3 }}>
-                                  {card}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {/* agent actions summary */}
-                        <div style={{ borderTop:"1px solid #091e30", paddingTop:8 }}>
-                          {agents.map(name => {
-                            const acts = (r.actions||[]).filter(a=>a.agent_name===name);
-                            const lastAct = acts[acts.length-1];
-                            const isWinner = name === winner;
-                            const isFolded = folded.includes(name);
-                            return (
-                              <div key={name} style={{ display:"flex", alignItems:"center",
-                                gap:8, marginBottom:5 }}>
-                                <span style={{ fontSize:13, minWidth:90,
-                                  color: isWinner?"#00f5ff" : isFolded?"#3a5060":"#7a9aaa",
-                                  fontWeight: isWinner?"bold":"normal" }}>
-                                  {name}
-                                </span>
-                                <span style={{ fontSize:11, padding:"2px 7px", borderRadius:3,
-                                  background: isWinner?"rgba(0,245,255,0.1)" : isFolded?"rgba(0,0,0,0.3)":"rgba(255,255,255,0.03)",
-                                  color: isWinner?"#00f5ff" : isFolded?"#3a5566":"#6a9aaa",
-                                  border:`1px solid ${isWinner?"#00f5ff33" : isFolded?"#1a3040":"#1a3040"}` }}>
-                                  {isFolded ? "FOLD" : (lastAct?.action||"—").toUpperCase()}
-                                </span>
-                                {lastAct?.hand_rank && (
-                                  <span style={{ fontSize:11, color:"#7ad0a0", marginLeft:"auto" }}>
-                                    {lastAct.hand_rank}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
+          {/* LEFT: session list */}
+          <div style={{width:240,borderRight:"1px solid #091e30",overflowY:"auto",flexShrink:0,
+            background:"rgba(0,3,12,0.98)",scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+            <div style={{padding:"12px 14px",borderBottom:"1px solid #091e30",
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:11,letterSpacing:3,color:"#3a7a90"}}>SESSIONS</span>
+              <button onClick={loadSessions}
+                style={{background:"transparent",border:"1px solid #0a2030",color:"#3a7090",
+                  padding:"2px 8px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+                {loadingSess?"...":"↻"}
+              </button>
+            </div>
+
+            {/* current live session at top if running */}
+            {handHistory.length>0&&(
+              <div onClick={()=>{setSessions(prev=>prev);setSelSession("live");setSelRounds([]);}}
+                style={{padding:"10px 14px",borderBottom:"1px solid #0a2030",cursor:"pointer",
+                  background:selSession==="live"?"rgba(0,245,255,0.06)":"rgba(0,245,255,0.02)",
+                  borderLeft:`3px solid ${selSession==="live"?"#00f5ff":"#00f5ff33"}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                  <span style={{fontSize:12,color:"#00f5ff",fontWeight:"bold",letterSpacing:1}}>● LIVE</span>
+                  <span style={{fontSize:11,color:"#f0cc55"}}>◈ {handHistory.reduce((a,h)=>a+h.pot,0)}</span>
                 </div>
+                <div style={{fontSize:11,color:"#3a6070"}}>{handHistory.length} hands played</div>
+              </div>
+            )}
+
+            {sessions.map(s=>(
+              <div key={s.id} onClick={()=>loadRounds(s.id)}
+                style={{padding:"10px 14px",borderBottom:"1px solid #081520",cursor:"pointer",
+                  background:selSession===s.id?"rgba(0,245,255,0.04)":"transparent",
+                  borderLeft:`3px solid ${selSession===s.id?"#00f5ff":"transparent"}`,
+                  transition:"background 0.15s"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                  <span style={{fontSize:12,color:selSession===s.id?"#00f5ff":"#5a8898",
+                    fontWeight:"bold",letterSpacing:1}}>#{s.id}</span>
+                  <span style={{fontSize:10,color:s.ended_at?"#4ade80":"#fb923c"}}>
+                    {s.ended_at?"DONE":"OPEN"}
+                  </span>
+                </div>
+                <div style={{fontSize:10,color:"#3a6070",marginBottom:2}}>
+                  {new Date(s.started_at).toLocaleString()}
+                </div>
+                <div style={{display:"flex",gap:8,fontSize:10}}>
+                  <span style={{color:"#4a8090"}}>{s.total_rounds||"?"} rounds</span>
+                  {s.winner_name&&<span style={{color:"#f0cc55"}}>▶ {s.winner_name}</span>}
+                </div>
+              </div>
+            ))}
+            {sessions.length===0&&handHistory.length===0&&(
+              <div style={{padding:20,fontSize:11,color:"#1a3a50",textAlign:"center",letterSpacing:2}}>
+                NO SESSIONS YET
               </div>
             )}
           </div>
-        </div>
 
+          {/* RIGHT: hand-by-hand detail */}
+          <div style={{flex:1,overflowY:"auto",background:"rgba(0,5,14,0.97)",
+            scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+            {(()=>{
+              // Determine what to show
+              const isLive = selSession==="live";
+              const hands = isLive ? handHistory : selRounds.map(r=>({
+                round: r.round_number,
+                pot: r.pot_size,
+                winner: r.winner_name,
+                winnerColor: "#00f5ff",
+                winnerIcon: "◈",
+                hand: (r.actions||[]).find(a=>a.agent_name===r.winner_name&&a.hand_rank)?.hand_rank||"—",
+                community: (r.community_cards||[]).map(c=>typeof c==="string"?c:(c?.rank||"")+(c?.suit||"")),
+                dealer: null, sb: null, bb: null,
+                players: [...new Set((r.actions||[]).map(a=>a.agent_name))].map(name=>{
+                  const acts=(r.actions||[]).filter(a=>a.agent_name===name);
+                  const streets=["PRE-FLOP","FLOP","TURN","RIVER"];
+                  return {
+                    name, icon:"◈", color:"#7ab8cc",
+                    holeCards: acts[0]?.hole_cards?.map(c=>typeof c==="string"?c:(c?.rank||"")+(c?.suit||""))||[],
+                    handRank: acts.find(a=>a.hand_rank)?.hand_rank||"",
+                    folded: acts.some(a=>a.action==="fold"),
+                    won: name===r.winner_name,
+                    streetActions: acts.map(a=>({street:a.street||"PRE-FLOP",action:a.action,amount:a.amount||0})),
+                    thought: acts[acts.length-1]?.thought||"",
+                  };
+                }),
+              }));
+
+              if (!selSession) return (
+                <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+                  height:"100%",flexDirection:"column",gap:10}}>
+                  <div style={{fontSize:13,color:"#1a4050",letterSpacing:3}}>SELECT A SESSION</div>
+                  {handHistory.length>0&&<div style={{fontSize:11,color:"#1a3040",letterSpacing:2}}>OR CLICK ● LIVE ABOVE</div>}
+                </div>
+              );
+
+              if (hands.length===0) return (
+                <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+                  height:"100%",fontSize:13,color:"#1a4050",letterSpacing:3}}>NO HANDS RECORDED</div>
+              );
+
+              const actionColor={fold:"#ff5555",check:"#7ab8cc",call:"#60a0e0",raise:"#f0cc55","all-in":"#ff6bff"};
+
+              return (
+                <div style={{padding:16}}>
+                  {/* session header */}
+                  <div style={{marginBottom:16,paddingBottom:14,borderBottom:"1px solid #091e30",
+                    display:"flex",gap:24,flexWrap:"wrap",alignItems:"center"}}>
+                    <span style={{fontSize:16,color:"#00f5ff",fontWeight:"bold",letterSpacing:3}}>
+                      {isLive?"● LIVE SESSION":`SESSION #${selSession}`}
+                    </span>
+                    {[["HANDS",hands.length],
+                      ["TOTAL POT","◈ "+hands.reduce((a,h)=>a+h.pot,0)],
+                    ].map(([l,v])=>(
+                      <div key={l}>
+                        <div style={{fontSize:10,color:"#3a6070",letterSpacing:2}}>{l}</div>
+                        <div style={{fontSize:13,color:"#7ab8cc"}}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* hand cards — newest first */}
+                  {[...hands].reverse().map((h,ri)=>(
+                    <div key={h.round} style={{marginBottom:14,background:"rgba(0,8,22,0.9)",
+                      border:"1px solid #0a2030",borderRadius:5,overflow:"hidden"}}>
+
+                      {/* hand header bar */}
+                      <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",
+                        background:"rgba(0,15,35,0.6)",borderBottom:"1px solid #091e30",flexWrap:"wrap"}}>
+                        <span style={{fontSize:13,color:"#3a7888",letterSpacing:2,fontWeight:"bold"}}>
+                          HAND #{h.round}
+                        </span>
+                        {/* positions */}
+                        {[["DEALER",h.dealer,"#f0cc55"],["SB",h.sb,"#fb923c"],["BB",h.bb,"#4ade80"]].map(([role,name,col])=>
+                          name?(
+                            <span key={role} style={{fontSize:10,color:col,background:`${col}15`,
+                              border:`1px solid ${col}44`,padding:"1px 7px",letterSpacing:1}}>
+                              {role}: {name}
+                            </span>
+                          ):null
+                        )}
+                        <span style={{marginLeft:"auto",fontSize:14,color:"#f0cc55",fontWeight:"bold"}}>
+                          POT ◈ {h.pot}
+                        </span>
+                      </div>
+
+                      <div style={{padding:"12px 14px"}}>
+                        {/* board */}
+                        {h.community?.length>0&&(
+                          <div style={{marginBottom:12}}>
+                            <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",marginBottom:6}}>BOARD</div>
+                            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                              {h.community.map((c,ci)=>{
+                                const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
+                                const red=cs.includes("♥")||cs.includes("♦");
+                                return(
+                                  <div key={ci} style={{width:36,height:52,borderRadius:4,
+                                    display:"flex",flexDirection:"column",alignItems:"center",
+                                    justifyContent:"center",fontWeight:"bold",
+                                    background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                                    border:`1px solid ${red?"#ff4466":"#6699cc"}`,
+                                    color:red?"#ff6688":"#c8d8f0"}}>
+                                    <span style={{fontSize:9}}>{cs.slice(0,-1)}</span>
+                                    <span style={{fontSize:13}}>{cs.slice(-1)}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* winner */}
+                        <div style={{marginBottom:12,padding:"8px 12px",borderRadius:4,
+                          background:"rgba(0,245,255,0.04)",border:"1px solid #00f5ff22",
+                          display:"flex",alignItems:"center",gap:10}}>
+                          <span style={{fontSize:11,color:"#3a7060",letterSpacing:2}}>WINNER</span>
+                          <span style={{fontSize:15,color:h.winnerColor||"#00f5ff",fontWeight:"bold",letterSpacing:1}}>
+                            {h.winnerIcon} {h.winner}
+                          </span>
+                          {h.hand&&h.hand!=="—"&&(
+                            <span style={{fontSize:11,color:"#7ad0a0",marginLeft:4}}>{h.hand}</span>
+                          )}
+                        </div>
+
+                        {/* players */}
+                        {(h.players||[]).map((p,pi)=>{
+                          const name = typeof p==="string"?p:p.name;
+                          const isWinner = name===h.winner;
+                          const col = p.color||(isWinner?"#00f5ff":"#5a8090");
+                          return(
+                            <div key={pi} style={{marginBottom:8,padding:"8px 10px",
+                              background:"rgba(0,5,18,0.7)",border:"1px solid #0a1e30",
+                              borderRadius:3,borderLeft:`3px solid ${isWinner?col:"#1a3040"}`}}>
+
+                              {/* player header */}
+                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
+                                <span style={{fontSize:14}}>{p.icon||"◈"}</span>
+                                <span style={{fontSize:13,color:col,fontWeight:"bold",letterSpacing:1,flex:1}}>
+                                  {name}
+                                </span>
+                                {/* hole cards */}
+                                {(p.holeCards||[]).length>0&&(
+                                  <div style={{display:"flex",gap:3}}>
+                                    {(p.holeCards||[]).map((c,ci)=>{
+                                      const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
+                                      const red=cs.includes("♥")||cs.includes("♦");
+                                      return(
+                                        <span key={ci} style={{fontSize:12,padding:"2px 6px",
+                                          fontWeight:"bold",
+                                          background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                                          border:`1px solid ${red?"#ff4466":"#6699cc"}`,
+                                          borderRadius:3,color:red?"#ff6688":"#c8d8f0"}}>
+                                          {cs}
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                                {p.handRank&&<span style={{fontSize:11,color:"#7ad0a0",letterSpacing:1}}>{p.handRank}</span>}
+                                {p.folded&&!isWinner&&(
+                                  <span style={{fontSize:10,color:"#3a5060",background:"rgba(0,0,0,0.3)",
+                                    padding:"1px 6px",border:"1px solid #1a3040",letterSpacing:1}}>FOLDED</span>
+                                )}
+                                {isWinner&&(
+                                  <span style={{fontSize:10,color:"#4ade80",background:"rgba(74,222,128,0.08)",
+                                    padding:"1px 6px",border:"1px solid #4ade8033",letterSpacing:1}}>WON</span>
+                                )}
+                              </div>
+
+                              {/* street actions */}
+                              {(p.streetActions||[]).length>0&&(
+                                <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:4}}>
+                                  {p.streetActions.map((sa,si)=>{
+                                    const ac=actionColor[sa.action]||"#5a8090";
+                                    return(
+                                      <div key={si} style={{display:"flex",alignItems:"center",gap:3,
+                                        padding:"2px 7px",borderRadius:2,
+                                        background:`${ac}12`,border:`1px solid ${ac}33`}}>
+                                        <span style={{fontSize:9,color:"#3a5060",letterSpacing:1}}>
+                                          {(sa.street||"").replace("PRE-FLOP","PRE")}
+                                        </span>
+                                        <span style={{fontSize:11,color:ac,fontWeight:"bold",
+                                          letterSpacing:1,textTransform:"uppercase"}}>
+                                          {sa.action}{sa.amount>0?` ◈${sa.amount}`:""}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {/* thought */}
+                              {p.thought&&(
+                                <div style={{fontSize:10,color:"#4a7080",fontStyle:"italic",
+                                  marginTop:2,lineHeight:1.4}}>
+                                  "{p.thought}"
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
       )}
 
       </div>
