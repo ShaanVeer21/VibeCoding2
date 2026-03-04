@@ -54,12 +54,11 @@ function Slider({ label, value, onChange, color="#00f5ff" }) {
 }
 
 // ─── AGENT POD ───────────────────────────────────────────────────────────────
-function AgentPod({ p, pos, gameActive, showCards, onRename, onRemove }) {
+function AgentPod({ p, pos, gameActive, showCards, onRename, onRemove, isActive, isDealer }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(p.name);
   const isElim   = p.eliminated;
   const isFold   = p.folded && !isElim;
-  const isActive = !isElim && !isFold;
   const statusLabel = isElim ? "ELIM" : isFold ? "FOLD" : p.lastAction ? p.lastAction.toUpperCase() : "WAIT";
   const statusColor = isElim ? "#ff4444" : isFold ? "#334466" : p.color;
 
@@ -71,18 +70,39 @@ function AgentPod({ p, pos, gameActive, showCards, onRename, onRemove }) {
   return (
     <div style={{ position:"absolute", ...pos, width:230,
       opacity: isElim ? 0.2 : 1, filter: isElim ? "grayscale(1)" : "none",
-      transition:"opacity 0.5s", zIndex:5 }}>
+      transition:"opacity 0.5s", zIndex: isActive ? 8 : 5 }}>
+
+      {/* active turn glow ring */}
+      {isActive && (
+        <div style={{ position:"absolute", inset:-4, borderRadius:6, zIndex:-1,
+          border:`2px solid ${p.color}`,
+          boxShadow:`0 0 20px ${p.color}cc, 0 0 40px ${p.color}66, 0 0 60px ${p.color}33`,
+          animation:"turnGlow 0.6s ease-in-out infinite alternate", pointerEvents:"none" }}/>
+      )}
+
+      {/* ▶ TURN label */}
+      {isActive && (
+        <div style={{ position:"absolute", top:-22, left:"50%", transform:"translateX(-50%)",
+          fontSize:11, letterSpacing:2, color:p.color, fontWeight:"bold",
+          background:"rgba(0,5,15,0.9)", padding:"2px 8px",
+          border:`1px solid ${p.color}66`, borderRadius:3, whiteSpace:"nowrap",
+          boxShadow:`0 0 10px ${p.color}44` }}>
+          ▶ YOUR TURN
+        </div>
+      )}
+
       <div style={{ background:"rgba(2,8,18,0.97)",
-        border:`1px solid ${isElim?"#0a1830":isFold?"#1a3050":p.color+"66"}`,
+        border:`1px solid ${isElim?"#0a1830":isFold?"#1a3050":isActive?p.color+"cc":p.color+"66"}`,
         borderRadius:4, padding:"12px 14px", position:"relative",
-        boxShadow: isActive ? `0 0 22px ${p.color}25` : "none" }}>
+        boxShadow: isActive ? `0 0 28px ${p.color}40` : "none",
+        transition:"border-color 0.2s, box-shadow 0.2s" }}>
 
         {/* corner accents */}
         {[{top:0,left:0,borderTop:`2px solid ${p.color}`,borderLeft:`2px solid ${p.color}`},
           {bottom:0,right:0,borderBottom:`2px solid ${p.color}`,borderRight:`2px solid ${p.color}`}
         ].map((s,i) => (
           <div key={i} style={{ position:"absolute", ...s, width:14, height:14,
-            opacity: isElim?0.1 : isFold?0.25 : 0.8 }}/>
+            opacity: isElim?0.1 : isFold?0.25 : isActive?1:0.8 }}/>
         ))}
 
         {/* name row */}
@@ -244,7 +264,7 @@ function AgentBuilder({ custom, setCustom, onDeploy }) {
       ))}
 
       {/* style */}
-      <div style={{ marginBottom:12 }}>
+      {/* <div style={{ marginBottom:12 }}>
         <div style={{ fontSize:12, letterSpacing:2, color:"#6a9aaa", marginBottom:7 }}>DECISION STYLE</div>
         <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
           {STYLES.map(s => (
@@ -257,7 +277,7 @@ function AgentBuilder({ custom, setCustom, onDeploy }) {
             </button>
           ))}
         </div>
-      </div>
+      </div> */}
 
       {/* buy-in */}
       <div style={{ marginBottom:12 }}>
@@ -318,29 +338,28 @@ function AgentBuilder({ custom, setCustom, onDeploy }) {
   );
 }
 
-// ─── POSITIONS — adapts per count ────────────────────────────────────────────
+// ─── POSITIONS — clockwise from top ──────────────────────────────────────────
 function getPositions(n) {
   if (n <= 4) return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },
-    { bottom:"3%", left:"50%",  transform:"translateX(-50%)" },
-    { top:"50%",   left:"1%",   transform:"translateY(-50%)" },
-    { top:"50%",   right:"1%",  transform:"translateY(-50%)" },
+    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12 — top center
+    { top:"15%",   right:"1%"  },                                 //  2 — top right
+    { bottom:"3%", left:"50%",  transform:"translateX(-50%)" },  //  6 — bottom center
+    { top:"15%",   left:"1%"  },                                  // 10 — top left
   ];
   if (n === 5) return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },
-    { top:"50%",   left:"1%",   transform:"translateY(-50%)" },
-    { bottom:"3%", left:"18%" },
-    { bottom:"3%", right:"18%" },
-    { top:"50%",   right:"1%",  transform:"translateY(-50%)" },
+    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12
+    { top:"15%",   right:"1%" },                                  //  2
+    { bottom:"3%", right:"14%"},                                  //  4
+    { bottom:"3%", left:"14%" },                                  //  8
+    { top:"15%",   left:"1%"  },                                  // 10
   ];
-  // 6 — hexagon
   return [
-    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },
-    { top:"20%",   right:"1%" },
-    { bottom:"3%", right:"1%" },
-    { bottom:"3%", left:"50%",  transform:"translateX(-50%)" },
-    { bottom:"3%", left:"1%" },
-    { top:"20%",   left:"1%" },
+    { top:"3%",    left:"50%",  transform:"translateX(-50%)" },  // 12
+    { top:"15%",   right:"1%" },                                  //  2
+    { bottom:"3%", right:"1%" },                                  //  4
+    { bottom:"3%", left:"50%", transform:"translateX(-50%)" },   //  6
+    { bottom:"3%", left:"1%"  },                                  //  8
+    { top:"15%",   left:"1%"  },                                  // 10
   ];
 }
 // ─── API helpers ─────────────────────────────────────────────────────────────
@@ -369,6 +388,8 @@ export default function PokerAgents() {
   const [selSession,  setSelSession]  = useState(null);      // selected session id
   const [selRounds,   setSelRounds]   = useState([]);        // rounds for selected session
   const [loadingSess, setLoadingSess] = useState(false);
+  const [activePlayerId, setActivePlayerId] = useState(null);
+  const [dealerIdx,   setDealerIdx]   = useState(0);
   const [custom, setCustom] = useState({
     name:"AGENT-X", icon:"◉", color:"#ff6b6b",
     params:{ risk:50, aggression:50, bluff:30, patience:50, tilt:20, adaptability:50, style:"SHARK" },
@@ -470,12 +491,26 @@ export default function PokerAgents() {
       let comm = [];
       pList = pList.map(p => ({...p, holeCards:[], folded:p.eliminated, currentBet:0, lastAction:null}));
 
-      const activeIds = pList.filter(p=>!p.eliminated).map(p=>p.id);
-      if (activeIds.length < 2) break;
+      // seat order is fixed (position in array = seat). active = non-eliminated only.
+      const seatIds = pList.filter(p=>!p.eliminated).map(p=>p.id);
+      if (seatIds.length < 2) break;
 
-      const dPos = round % activeIds.length;
-      const sbId = activeIds[(dPos+1)%activeIds.length];
-      const bbId = activeIds[(dPos+2)%activeIds.length];
+      // dealer rotates clockwise each round — dealer button seat index
+      const dealerPos  = (round - 1) % seatIds.length;
+      const sbPos      = (dealerPos + 1) % seatIds.length;
+      const bbPos      = (dealerPos + 2) % seatIds.length;
+      const sbId       = seatIds[sbPos];
+      const bbId       = seatIds[bbPos];
+
+      // action order: starts left of BB (pre-flop UTG), clockwise
+      // post-flop: starts left of dealer clockwise
+      const preFlopOrder = [...Array(seatIds.length).keys()]
+        .map(i => seatIds[(bbPos + 1 + i) % seatIds.length]);
+      const postFlopOrder = [...Array(seatIds.length).keys()]
+        .map(i => seatIds[(dealerPos + 1 + i) % seatIds.length]);
+
+      setDealerIdx(dealerPos);
+
       let curPot = SB + BB;
       pList = pList.map(p => {
         if (p.id===sbId) return {...p, chips:p.chips-SB, currentBet:SB};
@@ -505,28 +540,87 @@ export default function PokerAgents() {
 
         let roundMax = Math.max(0, ...pList.filter(p=>!p.folded&&!p.eliminated).map(p=>p.currentBet));
 
-        for (const pid of activeIds) {
-          if (!runRef.current) break;
-          const player = pList.find(p=>p.id===pid);
-          if (!player || player.folded || player.eliminated) continue;
+        // clockwise order: pre-flop starts UTG (left of BB), post-flop starts left of dealer
+        const actionOrder = ph === "PRE-FLOP" ? preFlopOrder : postFlopOrder;
 
-          // thinking animation
-          pList = pList.map(p => p.id===pid ? {...p,thinking:true} : p);
+        // --- correct poker betting round ---
+        // Each player acts exactly once per street UNLESS someone raises,
+        // in which case everyone who hasn't yet matched gets another action.
+        // We track the "last aggressor" index — when we reach them again, round ends.
+
+        // Build ordered list of active seat ids for this street
+        const streetOrder = actionOrder.filter(id => {
+          const p = pList.find(x=>x.id===id);
+          return p && !p.eliminated;
+        });
+
+        if (streetOrder.length < 2) break;
+
+        // index into streetOrder of the player who last raised (null = no raise yet)
+        let lastRaiserIdx = null;
+        // index of the NEXT player to act
+        let cursor = 0;
+        // how many consecutive players have acted without a new raise
+        let actedSinceRaise = 0;
+        const totalSeats = streetOrder.length;
+
+        while (true) {
+          if (!runRef.current) break;
+          const activePlayers = pList.filter(p=>!p.folded&&!p.eliminated);
+          if (activePlayers.length <= 1) break;
+
+          const pid = streetOrder[cursor % totalSeats];
+          const player = pList.find(p=>p.id===pid);
+
+          // skip folded/eliminated without counting as "acted"
+          if (!player || player.folded || player.eliminated) {
+            cursor++;
+            // if everyone remaining has matched and we skipped a full lap, stop
+            actedSinceRaise++;
+            if (actedSinceRaise >= totalSeats) break;
+            continue;
+          }
+
+          const callAmt = Math.max(0, roundMax - player.currentBet);
+
+          // stop condition: this player has already matched AND
+          // nobody raised since they last acted (actedSinceRaise >= active count)
+          if (callAmt === 0 && actedSinceRaise >= activePlayers.length) break;
+
+          // highlight whose turn it is
+          setActivePlayerId(pid);
+          pList = pList.map(p => p.id===pid ? {...p, thinking:true} : p);
           setPlayers([...pList]);
           await sleep(speedRef.current*0.35 + Math.random()*200);
 
-          const callAmt = Math.max(0, roundMax - player.currentBet);
           const dec = agentDecide(player, player.holeCards, comm, {
             pot:curPot, callAmount:callAmt, chips:player.chips,
             lastActions:pList.map(p=>({action:p.lastAction})),
             recentLosses:recentLosses[player.name]||0,
           });
 
-          let potAdd=0;
+          let potAdd = 0;
           let up = {...player, thinking:false, thought:dec.thought, lastAction:dec.action};
-          if (dec.action==="fold")                      { up.folded=true; }
-          else if (dec.action==="call"||dec.action==="check") { const pay=Math.min(player.chips,callAmt); up.chips=player.chips-pay; up.currentBet=player.currentBet+pay; potAdd=pay; }
-          else if (dec.action==="raise")                { const rt=Math.min(player.chips,dec.amount); up.chips=player.chips-rt; up.currentBet=player.currentBet+rt; potAdd=rt; roundMax=Math.max(roundMax,up.currentBet); }
+
+          if (dec.action==="fold") {
+            up.folded = true;
+            actedSinceRaise++;
+          } else if (dec.action==="call" || dec.action==="check") {
+            const pay = Math.min(player.chips, callAmt);
+            up.chips = player.chips - pay;
+            up.currentBet = player.currentBet + pay;
+            potAdd = pay;
+            actedSinceRaise++;
+          } else if (dec.action==="raise") {
+            const rt = Math.min(player.chips, dec.amount);
+            up.chips = player.chips - rt;
+            up.currentBet = player.currentBet + rt;
+            potAdd = rt;
+            roundMax = Math.max(roundMax, up.currentBet);
+            // raise reopens action — reset counter, this raiser counts as 1
+            lastRaiserIdx = cursor % totalSeats;
+            actedSinceRaise = 1;
+          }
 
           pList = pList.map(p => p.id===pid ? up : p);
           curPot += potAdd;
@@ -534,14 +628,16 @@ export default function PokerAgents() {
           setPlayers([...pList]);
           roundActions.push({ agent_name:player.name, action:dec.action, amount:dec.amount||0, thought:dec.thought, hole_cards:player.holeCards, hand_rank:null });
           await sleep(speedRef.current*0.6);
-        }
+
+          cursor++;
+        } // end while betting round
 
         const stillIn = pList.filter(p=>!p.folded&&!p.eliminated);
         if (stillIn.length<=1) break;
-      }
+      } // end for phase
 
       // showdown
-      setPhase("SHOWDOWN"); setShowCards(true);
+      setPhase("SHOWDOWN"); setShowCards(true); setActivePlayerId(null);
       await sleep(speedRef.current*0.3);
 
       const contenders = pList.filter(p=>!p.folded&&!p.eliminated);
@@ -711,7 +807,7 @@ export default function PokerAgents() {
 
         <div style={{ display:"flex", gap:7, alignItems:"center" }}>
           <span style={{ fontSize:13, color:"#4a7080" }}>SPEED</span>
-          {[["SLOW",6000],["MED",4500],["FAST",3000]].map(([l,v]) => (
+          {[["SLOW",6000],["MED",4500],["FAST",2000]].map(([l,v]) => (
             <button key={l} onClick={() => setSpeed(v)}
               style={{ background:speed===v?"rgba(0,245,255,0.1)":"transparent",
                 border:`1px solid ${speed===v?"#00f5ff44":"#0a1e30"}`,
@@ -821,11 +917,17 @@ export default function PokerAgents() {
           </div>
 
           {/* agent pods */}
-          {allPlayers.map((p, i) => (
-            <AgentPod key={p.id} p={p} pos={getPositions(allPlayers.length)[i] || getPositions(5)[0]}
-              gameActive={!!players} showCards={showCards}
-              onRename={handleRename} onRemove={handleRemove}/>
-          ))}
+          {allPlayers.map((p, i) => {
+            const activeSeatIds = allPlayers.filter(x=>!x.eliminated).map(x=>x.id);
+            const isDealer = activeSeatIds.length > 0 && activeSeatIds[dealerIdx % activeSeatIds.length] === p.id;
+            return (
+              <AgentPod key={p.id} p={p} pos={getPositions(allPlayers.length)[i] || getPositions(5)[0]}
+                gameActive={!!players} showCards={showCards}
+                isActive={activePlayerId === p.id}
+                isDealer={isDealer}
+                onRename={handleRename} onRemove={handleRemove}/>
+            );
+          })}
           {allPlayers.length >= 6 && (
             <div style={{ position:"absolute", bottom:"46%", left:"50%",
               transform:"translateX(-50%)", fontSize:10, letterSpacing:4,
