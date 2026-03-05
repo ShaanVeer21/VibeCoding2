@@ -571,6 +571,8 @@ export default function PokerAgents() {
   const [pendingAgent,   setPendingAgent]   = useState(null);
   const [activeTab,      setActiveTab]      = useState("table");
   const [handHistory,    setHandHistory]    = useState([]);
+  const [liveHandLog,    setLiveHandLog]    = useState([]); // live action log for current hand
+  const [logTab,         setLogTab]         = useState("hand"); // "hand" | "event"
   const [sessions,       setSessions]       = useState([]);
   const [selSession,     setSelSession]     = useState(null);
   const [selRounds,      setSelRounds]      = useState([]);
@@ -718,6 +720,7 @@ export default function PokerAgents() {
 
       let deck = createDeck();
       let comm = [];
+      setLiveHandLog([]); // clear log for new hand
       pList = pList.map(p=>({...p,holeCards:[],folded:p.eliminated,currentBet:0,lastAction:null}));
 
       const seatIds = pList.filter(p=>!p.eliminated && !p._queued).map(p=>p.id);
@@ -762,6 +765,11 @@ export default function PokerAgents() {
         return p;
       });
       let curPot = sbPost + bbPost;
+      // Log blind posts as first entries of this hand
+      setLiveHandLog([
+        { agent_name: pList.find(p=>p.id===_sbId)?.name||"SB", action:"blind", amount:sbPost, thought:"Posts small blind.", color:pList.find(p=>p.id===_sbId)?.color||"#fb923c", icon:pList.find(p=>p.id===_sbId)?.icon||"◈", street:"PRE-FLOP", isBlind:true, role:"SB" },
+        { agent_name: pList.find(p=>p.id===_bbId)?.name||"BB", action:"blind", amount:bbPost, thought:"Posts big blind.",   color:pList.find(p=>p.id===_bbId)?.color||"#4ade80", icon:pList.find(p=>p.id===_bbId)?.icon||"◈", street:"PRE-FLOP", isBlind:true, role:"BB" },
+      ]);
       await sleep(speedRef.current*0.3);
 
       // deal hole cards
@@ -771,15 +779,16 @@ export default function PokerAgents() {
 
       const roundActions=[];
 
-      // LLM decision cache: 1 call per hand total (prevents 429 on free tier)
-      const llmHandCache = {};
+      // Per-street LLM cache: one call per player per street max
+      const llmStreetCache = {}; // key: `${playerId}_${street}`
 
       for (const ph of ["PRE-FLOP","FLOP","TURN","RIVER"]) {
         if (!runRef.current) break;
         setPhase(ph);
-        if (ph==="FLOP")  comm=[deck.pop(),deck.pop(),deck.pop()];
-        if (ph==="TURN")  comm=[...comm,deck.pop()];
-        if (ph==="RIVER") comm=[...comm,deck.pop()];
+        // Burn one card before each community street (standard poker rule)
+        if (ph==="FLOP")  { deck.pop(); comm=[deck.pop(),deck.pop(),deck.pop()]; }
+        if (ph==="TURN")  { deck.pop(); comm=[...comm,deck.pop()]; }
+        if (ph==="RIVER") { deck.pop(); comm=[...comm,deck.pop()]; }
         setCommunity([...comm]);
         await sleep(speedRef.current*0.35);
 
@@ -796,10 +805,11 @@ export default function PokerAgents() {
 
         // Build ordered list of seat ids for this street (only those who CAN act)
         const streetSeats = actionOrder.filter(id => canAct(id));
-        if (streetSeats.length < 1) break;
-        // If only one can act and nobody else is all-in contending, skip street
+        // If nobody can act (all all-in or folded) — still deal community cards
+        // but skip betting. Use continue NOT break so FLOP/TURN/RIVER still dealt.
         const contendingCount = pList.filter(p=>!p.folded&&!p.eliminated).length;
-        if (contendingCount <= 1) break;
+        if (contendingCount <= 1) break; // only one player left — hand over
+        if (streetSeats.length < 1) continue; // all-in runout: deal cards, skip betting
 
         // ── Pre-flop special: BB already put in BB chips, but gets option ──
         // roundMax starts at BB for preflop (blinds already posted)
@@ -817,64 +827,52 @@ export default function PokerAgents() {
         }
 
         // ── Betting loop ─────────────────────────────────────────────────────
-        // We iterate through streetSeats in order, round-robin.
-        // lastAggressorIdx: index in streetSeats of the player who last raised.
-        // When action returns to them (everyone else called/folded), round ends.
-        // Special: pre-flop, BB gets the option even if nobody raised
-        // (BB can raise even if everyone just called).
+        // Rules:
+        // 1. Each player acts once per cycle in clockwise order
+        // 2. When someone raises, everyone ELSE gets one more action (re-queue)
+        //    but the raiser does NOT act again until someone raises after them
+        // 3. Max 4 bets per street (1 bet + 3 raises) — standard casino rule
+        // 4. Street ends when queue is empty (everyone called/checked/folded)
+        // 5. Pre-flop: BB gets option last even if nobody raised
 
-        let lastAggressorIdx = ph==="PRE-FLOP" ? -1 : -1;
-        // actedThisRound: set of seat ids who have acted since last raise
-        let actedSet = new Set();
-        // Pre-flop: SB and BB have already "acted" by posting — but BB still
-        // gets the option (can raise). So we mark SB as already acted,
-        // but NOT BB.
-        if (ph==="PRE-FLOP") {
-          actedSet.add(_sbId); // SB's forced post counts as their action
-          // BB does NOT get auto-marked — they get the option
+        // Build initial action queue in clockwise order
+        // Pre-flop: everyone acts in order UTG → ... → SB → BB
+        // BB goes LAST so they get the option (can raise even if everyone called)
+        // SB is NOT removed — they posted the blind but still need to act
+        let actionQueue;
+        if (ph === "PRE-FLOP") {
+          // streetSeats is already in preFlopOrder (UTG first)
+          // Just ensure BB is at the end for the option
+          const bbInSeats = streetSeats.filter(id => id === _bbId);
+          const notBB     = streetSeats.filter(id => id !== _bbId);
+          actionQueue = [...notBB, ...bbInSeats];
+        } else {
+          actionQueue = [...streetSeats];
         }
 
-        let seatCursor = 0; // index into streetSeats
-        let loopGuard  = 0; // prevent infinite loop under any circumstances
-        const MAX_ITERS = Math.max(40, streetSeats.length * 20); // enough for multiple re-raises
+        let lastRaiserId = null;
+        let betCount = 0; // track bet+raise count for cap enforcement
+        // Heads-up (2 players): no bet cap — unlimited raising allowed
+        // 3+ players: standard 4-bet cap (1 open + 3 raises)
+        const activePlayers = pList.filter(p=>!p.eliminated).length;
+        const BET_CAP = activePlayers <= 2 ? Infinity : 4;
 
-        while (loopGuard++ < MAX_ITERS) {
+        while (actionQueue.length > 0) {
           if (!runRef.current) break;
 
-          // Refresh who can still act (someone may have folded mid-round)
-          const stillCanAct = streetSeats.filter(id => canAct(id));
-          if (stillCanAct.length <= 0) break;
+          // Remove players who can no longer act (folded/all-in/eliminated)
+          actionQueue = actionQueue.filter(id => canAct(id));
+          if (actionQueue.length === 0) break;
 
-          // Non-folded, non-eliminated players (including all-in) for pot context
+          // If only one contender left, stop
           const activePot = pList.filter(p=>!p.folded&&!p.eliminated);
           if (activePot.length <= 1) break;
 
-          const pid = streetSeats[seatCursor % streetSeats.length];
-          seatCursor++;
-
-          // Skip if player can no longer act
-          if (!canAct(pid)) {
-            // If they've gone all-in, mark them as acted so we don't wait for them
-            actedSet.add(pid);
-            continue;
-          }
+          const pid = actionQueue.shift(); // dequeue next player
+          if (!canAct(pid)) continue;
 
           const player = pList.find(p=>p.id===pid);
           const callAmt = Math.max(0, roundMax - player.currentBet);
-
-          // ── Termination check ────────────────────────────────────────────
-          // Round ends when every player who can act has acted since the
-          // last aggressive action, AND their bet is equal to roundMax.
-          const everyoneActed = stillCanAct.every(id => {
-            const p = pList.find(x=>x.id===id);
-            if (!p || p.folded || p.eliminated) return true;
-            const theirCallAmt = Math.max(0, roundMax - p.currentBet);
-            return actedSet.has(id) && theirCallAmt === 0;
-          });
-          if (everyoneActed) break;
-
-          // If this player already acted and owes nothing, skip
-          if (actedSet.has(pid) && callAmt === 0) continue;
 
           // ── Player acts ──────────────────────────────────────────────────
           setActivePlayerId(pid);
@@ -889,8 +887,9 @@ export default function PokerAgents() {
           if (assignedProvider && hasLLMKey) {
             // Per-hand cache: call LLM once per hand, reuse decision all streets
             // This keeps API calls to 1/hand max — safe even on free tier (3 req/min)
-            if (llmHandCache[player.id]) {
-              dec = llmHandCache[player.id];
+            const cacheKey = `${player.id}_${ph}`;
+            if (llmStreetCache[cacheKey]) {
+              dec = llmStreetCache[cacheKey];
             } else {
               const llmResult = await llmDecide(
                 {...player, llmProvider:assignedProvider},
@@ -902,7 +901,7 @@ export default function PokerAgents() {
               );
               if (llmResult && !llmResult._error) {
                 dec = llmResult;
-                llmHandCache[player.id] = llmResult; // cache for rest of hand
+                llmStreetCache[cacheKey] = llmResult; // cache within this street only
               }
             }
             // _rateLimited or any error: silent fallback, no log noise
@@ -936,41 +935,56 @@ export default function PokerAgents() {
             dec = { ...dec, action: "call", amount: player.chips, thought: "All-in." };
           }
 
+          // ── Enforce bet cap: convert raise to call if cap already reached ──
+          if (dec.action === "raise" && betCount >= BET_CAP) {
+            dec = { ...dec, action: "call", thought: dec.thought + " [cap reached]" };
+            up.thought = dec.thought;
+            up.lastAction = "call";
+          }
+
           if (dec.action === "fold") {
             up.folded = true;
-            actedSet.add(pid);
 
           } else if (dec.action === "check") {
-            // callAmt is guaranteed 0 here after validation above
-            actedSet.add(pid);
+            // callAmt guaranteed 0 here
 
           } else if (dec.action === "call") {
-            const pay = Math.min(player.chips, callAmt); // all-in if can't cover
+            const pay = Math.min(player.chips, callAmt);
             up.chips       = player.chips - pay;
             up.currentBet  = player.currentBet + pay;
             potAdd = pay;
-            actedSet.add(pid);
             if (up.chips === 0) { up.lastAction = "all-in"; up.folded = false; }
 
           } else if (dec.action === "raise") {
-            // Enforce minimum raise: must be at least minRaiseSize more than current max
-            const minTotal = roundMax + minRaiseSize; // minimum total bet to be a valid raise
-            const requestedTotal = player.currentBet + Math.min(player.chips, dec.amount);
+            const minTotal = roundMax + minRaiseSize;
             const raiseTotal = Math.min(
               player.chips,
-              Math.max(dec.amount, minTotal - player.currentBet) // enforce min raise
+              Math.max(dec.amount, minTotal - player.currentBet)
             );
             up.chips      = player.chips - raiseTotal;
             up.currentBet = player.currentBet + raiseTotal;
             potAdd = raiseTotal;
             if (up.currentBet > roundMax) {
-              minRaiseSize = up.currentBet - roundMax; // update min re-raise size
+              minRaiseSize = up.currentBet - roundMax;
               roundMax = up.currentBet;
-              actedSet = new Set([pid]); // re-open action
+              betCount++;
+              lastRaiserId = pid;
+              if (betCount < BET_CAP) {
+                // Re-open: give every OTHER active player one more action, in clockwise order
+                // Preserve seat order, start from player after raiser, exclude raiser
+                const raiserPos = streetSeats.indexOf(pid);
+                actionQueue = [
+                  ...streetSeats.slice(raiserPos + 1),
+                  ...streetSeats.slice(0, raiserPos),
+                ].filter(id => id !== pid && canAct(id));
+              } else {
+                // Bet cap reached — no more raises allowed, drain remaining callers
+                actionQueue = streetSeats
+                  .filter(id => id !== pid && canAct(id) && Math.max(0, roundMax - (pList.find(p=>p.id===id)?.currentBet||0)) > 0);
+              }
             } else {
-              // Couldn't meet min raise (short stack) — treat as call
+              // Short stack couldn't raise — treat as call
               up.lastAction = "call";
-              actedSet.add(pid);
             }
             if (up.chips === 0) up.lastAction = "all-in";
           }
@@ -979,12 +993,15 @@ export default function PokerAgents() {
           curPot  += potAdd;
           setPot(curPot);
           setPlayers([...pList]);
-          roundActions.push({
+          const currentStreet = ph; // explicit capture — avoids any closure ambiguity
+          const actionEntry = {
             agent_name: player.name, action: dec.action,
             amount: dec.action==="raise" ? potAdd : dec.action==="call" ? potAdd : 0,
-            thought: dec.thought,
-            hole_cards: player.holeCards, hand_rank: null, street: ph,
-          });
+            thought: dec.thought, color: player.color, icon: player.icon,
+            hole_cards: player.holeCards, hand_rank: null, street: currentStreet,
+          };
+          roundActions.push(actionEntry);
+          setLiveHandLog(prev => [...prev, actionEntry]); // update live log
           await sleep(speedRef.current*0.55);
 
         } // end betting while
@@ -1111,13 +1128,12 @@ export default function PokerAgents() {
         winnerIcon: roundWinner?.icon,
         hand: winnerHand,
         community: comm.map(c=>c.rank+c.suit),
-        dealer: dealerPlayer?.name,
-        sb: sbPlayer?.name,
-        bb: bbPlayer?.name,
+        dealer: dealerPlayer?.name || seatIds[dealerPos] || null,
+        sb: sbPlayer?.name || _sbId || null,
+        bb: bbPlayer?.name || _bbId || null,
+        actions: roundActions, // full ordered action log for event timeline
         players: pList.filter(p=>!p.eliminated||roundActions.some(a=>a.agent_name===p.name)).map(p=>{
           const myActions = roundActions.filter(a=>a.agent_name===p.name);
-          // group by street
-          const streets = ["PRE-FLOP","FLOP","TURN","RIVER"];
           const streetActions = myActions.map(a=>({
             street: a.street||"PRE-FLOP",
             action: a.action,
@@ -1633,59 +1649,162 @@ export default function PokerAgents() {
 
           {showBuilder&&<AgentBuilder custom={custom} setCustom={setCustom} onDeploy={deployCustom}/>}
 
-          {/* log header */}
-          <div style={{padding:"10px 14px",borderBottom:"1px solid #091e30",
-            fontSize:13,letterSpacing:3,color:"#3a7a90",
-            display:"flex",justifyContent:"space-between"}}>
-            <span>MISSION LOG</span>
-            <span style={{color:"#2a5060"}}>{logs.length}</span>
+          {/* log header — tabbed: HAND LOG | EVENT LOG */}
+          <div style={{borderBottom:"1px solid #091e30",display:"flex"}}>
+            {[["hand","HAND LOG"],["event","EVENT LOG"]].map(([tab,label])=>(
+              <button key={tab}
+                onClick={()=>setLogTab(tab)}
+                style={{flex:1,padding:"10px 6px",fontSize:11,letterSpacing:2,
+                  background:logTab===tab?"rgba(0,245,255,0.05)":"transparent",
+                  color:logTab===tab?"#00f5ff":"#2a5060",
+                  border:"none",borderBottom:`2px solid ${logTab===tab?"#00f5ff":"transparent"}`,
+                  cursor:"pointer",fontFamily:"'Courier New',monospace"}}>
+                {label}
+              </button>
+            ))}
           </div>
 
-          {/* log entries */}
-          <div ref={logRef} style={{flex:1,overflowY:"auto",padding:"8px 10px",
-            scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
-            {logs.map(e=>e.type==="round"?(
-              <div key={e.id} style={{marginBottom:10,border:`1px solid ${e.winnerColor}33`,
-                borderLeft:`3px solid ${e.winnerColor}`,borderRadius:4,
-                background:"rgba(0,8,20,0.7)",padding:"9px 11px"}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                  <span style={{fontSize:11,color:"#3a6878",letterSpacing:2}}>ROUND {e.round}</span>
-                  <span style={{fontSize:13,color:"#f0cc55",fontWeight:"bold"}}>◈ {e.pot}</span>
-                </div>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
-                  <span style={{fontSize:18}}>{e.winnerIcon}</span>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:15,color:e.winnerColor,fontWeight:"bold",letterSpacing:1}}>{e.winner}</div>
-                    {e.hand!=="—"&&<div style={{fontSize:12,color:"#7ad0a0"}}>{e.hand}</div>}
+          {/* ── HAND LOG TAB ── live street-by-street action log */}
+          {logTab==="hand"&&(
+            <div ref={logRef} style={{flex:1,overflowY:"auto",padding:"10px",
+              scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+              {(()=>{
+                const streets=["PRE-FLOP","FLOP","TURN","RIVER"];
+                const ac={fold:"#ff5555",check:"#7ab8cc",call:"#60a0e0",raise:"#f0cc55","all-in":"#ff6bff",blind:"#fb923c"};
+                const byStreet={};
+                streets.forEach(st=>{ byStreet[st]=liveHandLog.filter(a=>a.street===st); });
+                const anyActions = liveHandLog.length>0;
+                if(!anyActions) return(
+                  <div style={{padding:"14px 6px",fontSize:12,color:"#2a4a5a",letterSpacing:2}}>
+                    {running?"WAITING FOR HAND...":"AWAITING SIGNAL..."}
                   </div>
-                  <span style={{fontSize:13,color:"#4ade80",fontWeight:"bold",
-                    background:"rgba(74,222,128,0.1)",padding:"2px 8px",
-                    border:"1px solid #4ade8033",borderRadius:3}}>WIN</span>
-                </div>
-                {e.community?.length>0&&(
-                  <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:5}}>
-                    {e.community.map((c,i)=>{
-                      const red=c.includes("♥")||c.includes("♦");
-                      return<span key={i} style={{fontSize:12,color:red?"#ff8899":"#90b8e0",
-                        background:"rgba(0,15,35,0.9)",padding:"2px 6px",
-                        border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:3}}>{c}</span>;
+                );
+                // Dealer/SB/BB header
+                const dealerName = allPlayers.find(p=>{
+                  const ids=allPlayers.filter(x=>!x.eliminated).map(x=>x.id);
+                  return ids[dealerIdx%ids.length]===p.id;
+                })?.name;
+                return(
+                  <div>
+                    {/* positions header */}
+                    <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap",
+                      padding:"6px 8px",background:"rgba(0,5,18,0.8)",borderRadius:4,
+                      border:"1px solid #091e30"}}>
+                      <span style={{fontSize:9,color:"#2a5060",letterSpacing:2,alignSelf:"center"}}>HAND {roundNum}</span>
+                      {[[dealerName,"DEALER","#f0cc55"],[allPlayers.find(p=>p.id===sbId)?.name,"SB","#fb923c"],[allPlayers.find(p=>p.id===bbId)?.name,"BB","#4ade80"]].filter(([n])=>n).map(([name,role,col])=>(
+                        <span key={role} style={{fontSize:9,color:col,padding:"1px 6px",
+                          background:`${col}12`,border:`1px solid ${col}33`,borderRadius:2,letterSpacing:1}}>
+                          {role}: {name}
+                        </span>
+                      ))}
+                    </div>
+                    {/* streets */}
+                    {streets.map(st=>{
+                      const acts=byStreet[st];
+                      if(!acts||acts.length===0) return null;
+                      return(
+                        <div key={st} style={{marginBottom:10}}>
+                          {/* street label */}
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
+                            <span style={{fontSize:9,color:"#00f5ff88",letterSpacing:2,fontWeight:"bold",
+                              padding:"2px 7px",background:"rgba(0,245,255,0.06)",
+                              border:"1px solid #00f5ff22",borderRadius:2}}>{st}</span>
+                            {/* community cards for this street */}
+                            {st==="FLOP"&&community.slice(0,3).map((c,i)=>{
+                              const red=c.suit==="♥"||c.suit==="♦";
+                              return <span key={i} style={{fontSize:11,color:red?"#ff8899":"#90b8e0",
+                                background:"rgba(0,15,35,0.9)",padding:"1px 5px",
+                                border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:2}}>
+                                {c.rank}{c.suit}</span>;
+                            })}
+                            {st==="TURN"&&community[3]&&(()=>{const c=community[3];const red=c.suit==="♥"||c.suit==="♦";return <span style={{fontSize:11,color:red?"#ff8899":"#90b8e0",background:"rgba(0,15,35,0.9)",padding:"1px 5px",border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:2}}>{c.rank}{c.suit}</span>;})()}
+                            {st==="RIVER"&&community[4]&&(()=>{const c=community[4];const red=c.suit==="♥"||c.suit==="♦";return <span style={{fontSize:11,color:red?"#ff8899":"#90b8e0",background:"rgba(0,15,35,0.9)",padding:"1px 5px",border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:2}}>{c.rank}{c.suit}</span>;})()}
+                            <div style={{flex:1,height:"1px",background:"#091e30"}}/>
+                          </div>
+                          {/* actions */}
+                          {acts.map((a,i)=>{
+                            const col=ac[a.action]||"#5a8090";
+                            return(
+                              <div key={i} style={{display:"flex",alignItems:"flex-start",gap:6,
+                                padding:"3px 4px",marginBottom:1,borderRadius:2,
+                                background:a.action==="raise"||a.action==="all-in"?"rgba(240,204,85,0.03)":"transparent",
+                                borderLeft:a.isBlind?`2px solid #fb923c44`:a.action==="raise"?`2px solid ${col}55`:"2px solid transparent"}}>
+                                <span style={{fontSize:9,color:"#1a4050",minWidth:14,paddingTop:2,fontFamily:"monospace"}}>{i+1}.</span>
+                                <span style={{fontSize:11}}>{a.icon}</span>
+                                <span style={{fontSize:11,color:a.color,fontWeight:"bold",minWidth:56,letterSpacing:0.5,
+                                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.agent_name}</span>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+                                    <span style={{fontSize:10,color:col,fontWeight:"bold",letterSpacing:1,
+                                      padding:"0 5px",background:`${col}12`,border:`1px solid ${col}33`,borderRadius:2,
+                                      textTransform:"uppercase"}}>
+                                      {a.isBlind?`${a.role} blind`:a.action}
+                                    </span>
+                                    {a.amount>0&&<span style={{fontSize:10,color:"#f0cc55"}}>◈{a.amount}</span>}
+                                  </div>
+                                  {a.thought&&<div style={{fontSize:9,color:"#3a6070",fontStyle:"italic",
+                                    marginTop:1,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",
+                                    whiteSpace:"nowrap",maxWidth:130}}>"{a.thought}"</div>}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
                     })}
                   </div>
-                )}
-                {e.folded?.length>0&&(
-                  <div style={{fontSize:11,color:"#4a7080"}}>folded: {e.folded.join(", ")}</div>
-                )}
-              </div>
-            ):(
-              <div key={e.id} style={{padding:"4px 6px",fontSize:13,lineHeight:1.5,
-                color:e.color,marginBottom:2}}>{e.msg}</div>
-            ))}
-            {!logs.length&&(
-              <div style={{padding:"14px 6px",fontSize:13,color:"#2a4a5a",letterSpacing:2}}>
-                AWAITING SIGNAL...
-              </div>
-            )}
-          </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* ── EVENT LOG TAB ── mission log */}
+          {logTab==="event"&&(
+            <div ref={logTab==="event"?logRef:null} style={{flex:1,overflowY:"auto",padding:"8px 10px",
+              scrollbarWidth:"thin",scrollbarColor:"#0a1e30 transparent"}}>
+              {logs.map(e=>e.type==="round"?(
+                <div key={e.id} style={{marginBottom:10,border:`1px solid ${e.winnerColor}33`,
+                  borderLeft:`3px solid ${e.winnerColor}`,borderRadius:4,
+                  background:"rgba(0,8,20,0.7)",padding:"9px 11px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:11,color:"#3a6878",letterSpacing:2}}>ROUND {e.round}</span>
+                    <span style={{fontSize:13,color:"#f0cc55",fontWeight:"bold"}}>◈ {e.pot}</span>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                    <span style={{fontSize:18}}>{e.winnerIcon}</span>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:15,color:e.winnerColor,fontWeight:"bold",letterSpacing:1}}>{e.winner}</div>
+                      {e.hand!=="—"&&<div style={{fontSize:12,color:"#7ad0a0"}}>{e.hand}</div>}
+                    </div>
+                    <span style={{fontSize:13,color:"#4ade80",fontWeight:"bold",
+                      background:"rgba(74,222,128,0.1)",padding:"2px 8px",
+                      border:"1px solid #4ade8033",borderRadius:3}}>WIN</span>
+                  </div>
+                  {e.community?.length>0&&(
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:5}}>
+                      {e.community.map((c,i)=>{
+                        const red=c.includes("♥")||c.includes("♦");
+                        return<span key={i} style={{fontSize:12,color:red?"#ff8899":"#90b8e0",
+                          background:"rgba(0,15,35,0.9)",padding:"2px 6px",
+                          border:`1px solid ${red?"#ff446633":"#335577"}`,borderRadius:3}}>{c}</span>;
+                      })}
+                    </div>
+                  )}
+                  {e.folded?.length>0&&(
+                    <div style={{fontSize:11,color:"#4a7080"}}>folded: {e.folded.join(", ")}</div>
+                  )}
+                </div>
+              ):(
+                <div key={e.id} style={{padding:"4px 6px",fontSize:13,lineHeight:1.5,
+                  color:e.color,marginBottom:2}}>{e.msg}</div>
+              ))}
+              {!logs.length&&(
+                <div style={{padding:"14px 6px",fontSize:13,color:"#2a4a5a",letterSpacing:2}}>
+                  AWAITING SIGNAL...
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── TABLE POSITIONS WIDGET ── */}
           {running && (
@@ -1940,24 +2059,77 @@ export default function PokerAgents() {
                         </span>
                       </div>
 
+                      {/* ── POSITIONS ROW — always visible ── */}
+                      <div style={{display:"flex",gap:6,padding:"8px 14px",
+                        background:"rgba(0,5,14,0.8)",borderBottom:"1px solid #091e30",flexWrap:"wrap"}}>
+                        <span style={{fontSize:9,color:"#2a5060",letterSpacing:2,alignSelf:"center",marginRight:4}}>SEATS →</span>
+                        {(h.players||[]).map((p,pi)=>{
+                          const name=typeof p==="string"?p:p.name;
+                          const isDealer=name===h.dealer, isSB=name===h.sb, isBB=name===h.bb;
+                          const col=p.color||"#5a8090";
+                          const isWinner=name===h.winner;
+                          return(
+                            <div key={pi} style={{display:"flex",alignItems:"center",gap:4,
+                              padding:"3px 8px",borderRadius:3,
+                              background:isWinner?"rgba(0,245,255,0.06)":"rgba(0,5,18,0.6)",
+                              border:`1px solid ${isWinner?"#00f5ff22":"#0a1e30"}`}}>
+                              <span style={{fontSize:10,color:col,fontWeight:"bold"}}>{name}</span>
+                              {isDealer&&<span style={{fontSize:8,color:"#f0cc55",background:"rgba(240,204,85,0.12)",
+                                padding:"0 4px",border:"1px solid #f0cc5544",letterSpacing:1}}>DEALER</span>}
+                              {isSB&&<span style={{fontSize:8,color:"#fb923c",background:"rgba(251,146,60,0.12)",
+                                padding:"0 4px",border:"1px solid #fb923c44",letterSpacing:1}}>SB</span>}
+                              {isBB&&<span style={{fontSize:8,color:"#4ade80",background:"rgba(74,222,128,0.12)",
+                                padding:"0 4px",border:"1px solid #4ade8044",letterSpacing:1}}>BB</span>}
+                              {isWinner&&<span style={{fontSize:8,color:"#00f5ff",letterSpacing:1}}>★WIN</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+
                       <div style={{padding:"12px 14px"}}>
-                        {/* board */}
-                        {h.community?.length>0&&(
-                          <div style={{marginBottom:12}}>
-                            <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",marginBottom:6}}>BOARD</div>
-                            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                              {h.community.map((c,ci)=>{
-                                const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
-                                const red=cs.includes("♥")||cs.includes("♦");
+
+                        {/* ── HOLE CARDS GRID ── */}
+                        {(h.players||[]).filter(p=>p.holeCards?.length>0).length>0&&(
+                          <div style={{marginBottom:14}}>
+                            <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",marginBottom:8}}>HOLE CARDS</div>
+                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                              {(h.players||[]).map((p,pi)=>{
+                                if(!p.holeCards?.length) return null;
+                                const name=typeof p==="string"?p:p.name;
+                                const isWinner=name===h.winner;
+                                const col=p.color||(isWinner?"#00f5ff":"#5a8090");
+                                const role=name===h.dealer?"DEALER":name===h.sb?"SB":name===h.bb?"BB":"";
                                 return(
-                                  <div key={ci} style={{width:36,height:52,borderRadius:4,
-                                    display:"flex",flexDirection:"column",alignItems:"center",
-                                    justifyContent:"center",fontWeight:"bold",
-                                    background:"linear-gradient(135deg,#0d1b2a,#162032)",
-                                    border:`1px solid ${red?"#ff4466":"#6699cc"}`,
-                                    color:red?"#ff6688":"#c8d8f0"}}>
-                                    <span style={{fontSize:9}}>{cs.slice(0,-1)}</span>
-                                    <span style={{fontSize:13}}>{cs.slice(-1)}</span>
+                                  <div key={pi} style={{display:"flex",flexDirection:"column",gap:4,
+                                    padding:"7px 10px",borderRadius:4,
+                                    background:isWinner?"rgba(0,245,255,0.04)":"rgba(0,5,18,0.6)",
+                                    border:`1px solid ${isWinner?"#00f5ff22":"#0a1e30"}`,
+                                    borderTop:`2px solid ${col}`}}>
+                                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                                      <span style={{fontSize:11,color:col,fontWeight:"bold",letterSpacing:1}}>{name}</span>
+                                      {role&&<span style={{fontSize:9,color:"#f0cc5599",letterSpacing:1,
+                                        background:"rgba(240,204,85,0.08)",padding:"0 4px",border:"1px solid #f0cc5522"}}>{role}</span>}
+                                      {isWinner&&<span style={{fontSize:9,color:"#4ade80",marginLeft:"auto",
+                                        background:"rgba(74,222,128,0.08)",padding:"0 5px",border:"1px solid #4ade8033"}}>WON</span>}
+                                      {p.folded&&!isWinner&&<span style={{fontSize:9,color:"#3a5060",marginLeft:"auto"}}>FOLDED</span>}
+                                    </div>
+                                    <div style={{display:"flex",gap:3}}>
+                                      {p.holeCards.map((c,ci)=>{
+                                        const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
+                                        const red=cs.includes("♥")||cs.includes("♦");
+                                        return(
+                                          <div key={ci} style={{width:32,height:44,borderRadius:3,display:"flex",
+                                            flexDirection:"column",alignItems:"center",justifyContent:"center",
+                                            fontWeight:"bold",background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                                            border:`1px solid ${red?"#ff4466":"#6699cc"}`,
+                                            color:red?"#ff6688":"#c8d8f0"}}>
+                                            <span style={{fontSize:8}}>{cs.slice(0,-1)}</span>
+                                            <span style={{fontSize:12}}>{cs.slice(-1)}</span>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                    {p.handRank&&<span style={{fontSize:9,color:"#7ad0a0",letterSpacing:1}}>{p.handRank}</span>}
                                   </div>
                                 );
                               })}
@@ -1965,96 +2137,187 @@ export default function PokerAgents() {
                           </div>
                         )}
 
-                        {/* winner */}
-                        <div style={{marginBottom:12,padding:"8px 12px",borderRadius:4,
-                          background:"rgba(0,245,255,0.04)",border:"1px solid #00f5ff22",
-                          display:"flex",alignItems:"center",gap:10}}>
-                          <span style={{fontSize:11,color:"#3a7060",letterSpacing:2}}>WINNER</span>
-                          <span style={{fontSize:15,color:h.winnerColor||"#00f5ff",fontWeight:"bold",letterSpacing:1}}>
-                            {h.winnerIcon} {h.winner}
-                          </span>
-                          {h.hand&&h.hand!=="—"&&(
-                            <span style={{fontSize:11,color:"#7ad0a0",marginLeft:4}}>{h.hand}</span>
-                          )}
-                        </div>
+                        {/* ── BOARD ── */}
+                        {h.community?.length>0&&(
+                          <div style={{marginBottom:14,display:"flex",alignItems:"center",gap:12}}>
+                            <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",minWidth:40}}>BOARD</div>
+                            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                              {h.community.map((c,ci)=>{
+                                const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
+                                const red=cs.includes("♥")||cs.includes("♦");
+                                const streetLabel=ci===0?"FLOP":ci===3?"TURN":ci===4?"RIVER":"";
+                                return(
+                                  <div key={ci} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                                    {streetLabel&&<span style={{fontSize:8,color:"#2a5060",letterSpacing:1}}>{streetLabel}</span>}
+                                    <div style={{width:34,height:48,borderRadius:4,display:"flex",
+                                      flexDirection:"column",alignItems:"center",justifyContent:"center",
+                                      fontWeight:"bold",background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                                      border:`1px solid ${red?"#ff4466":"#6699cc"}`,
+                                      color:red?"#ff6688":"#c8d8f0"}}>
+                                      <span style={{fontSize:8}}>{cs.slice(0,-1)}</span>
+                                      <span style={{fontSize:12}}>{cs.slice(-1)}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {/* winner */}
+                            <div style={{marginLeft:"auto",padding:"6px 12px",borderRadius:4,
+                              background:"rgba(0,245,255,0.04)",border:"1px solid #00f5ff22",textAlign:"right"}}>
+                              <div style={{fontSize:9,color:"#3a7060",letterSpacing:2}}>WINNER</div>
+                              <div style={{fontSize:13,color:h.winnerColor||"#00f5ff",fontWeight:"bold",letterSpacing:1}}>
+                                {h.winnerIcon} {h.winner}
+                              </div>
+                              {h.hand&&h.hand!=="—"&&<div style={{fontSize:10,color:"#7ad0a0"}}>{h.hand}</div>}
+                            </div>
+                          </div>
+                        )}
 
-                        {/* players */}
-                        {(h.players||[]).map((p,pi)=>{
-                          const name = typeof p==="string"?p:p.name;
-                          const isWinner = name===h.winner;
-                          const col = p.color||(isWinner?"#00f5ff":"#5a8090");
+                        {/* ── CHRONOLOGICAL EVENT LOG ── */}
+                        {(()=>{
+                          // Build full ordered event log from streetActions across all players
+                          // Reconstruct chronological order: group by street, preserve action order within
+                          const streets=["PRE-FLOP","FLOP","TURN","RIVER"];
+                          const allActions=[];
+
+                          // Blinds posted first
+                          if(h.sb) allActions.push({type:"blind",role:"SB",name:h.sb,amount:25,street:"PRE-FLOP"});
+                          if(h.bb) allActions.push({type:"blind",role:"BB",name:h.bb,amount:50,street:"PRE-FLOP"});
+
+                          // Rebuild ordered actions from streetActions per player
+                          // Use the original roundActions order stored in h.actions if available
+                          const ordered = h.actions && h.actions.length>0
+                            ? h.actions
+                            : streets.flatMap(st=>{
+                                // collect all actions for this street across all players in seat order
+                                const streetActs=[];
+                                (h.players||[]).forEach(p=>{
+                                  (p.streetActions||[]).filter(a=>a.street===st).forEach(a=>{
+                                    streetActs.push({...a,name:p.name,thought:p.thought,color:p.color,icon:p.icon});
+                                  });
+                                });
+                                return streetActs;
+                              });
+
+                          // Group into streets for rendering
+                          const byStreet={};
+                          streets.forEach(st=>{
+                            byStreet[st]= h.actions
+                              ? h.actions.filter(a=>(a.street||"PRE-FLOP")===st).map(a=>({
+                                  name:a.agent_name||a.name, action:a.action,
+                                  amount:a.amount||0, thought:a.thought||"",
+                                  color:(h.players||[]).find(p=>p.name===(a.agent_name||a.name))?.color||"#7ab8cc",
+                                  icon:(h.players||[]).find(p=>p.name===(a.agent_name||a.name))?.icon||"◈",
+                                }))
+                              : (h.players||[]).flatMap(p=>
+                                  (p.streetActions||[]).filter(a=>a.street===st).map(a=>({
+                                    name:p.name,action:a.action,amount:a.amount||0,
+                                    thought:p.thought||"",color:p.color||"#7ab8cc",icon:p.icon||"◈"
+                                  }))
+                                );
+                          });
+
+                          const streetCards={"FLOP":h.community?.slice(0,3)||[],"TURN":[h.community?.[3]],"RIVER":[h.community?.[4]]};
+                          // Show street if it has actions OR if community cards were dealt for it
+                          const streetHasContent=st=>{
+                            if(byStreet[st]?.length>0) return true;
+                            if(st==="FLOP"&&h.community?.length>=3) return true;
+                            if(st==="TURN"&&h.community?.length>=4) return true;
+                            if(st==="RIVER"&&h.community?.length>=5) return true;
+                            if(st==="PRE-FLOP") return true; // always show preflop
+                            return false;
+                          };
+
                           return(
-                            <div key={pi} style={{marginBottom:8,padding:"8px 10px",
-                              background:"rgba(0,5,18,0.7)",border:"1px solid #0a1e30",
-                              borderRadius:3,borderLeft:`3px solid ${isWinner?col:"#1a3040"}`}}>
-
-                              {/* player header */}
-                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
-                                <span style={{fontSize:14}}>{p.icon||"◈"}</span>
-                                <span style={{fontSize:13,color:col,fontWeight:"bold",letterSpacing:1,flex:1}}>
-                                  {name}
-                                </span>
-                                {/* hole cards */}
-                                {(p.holeCards||[]).length>0&&(
-                                  <div style={{display:"flex",gap:3}}>
-                                    {(p.holeCards||[]).map((c,ci)=>{
+                            <div>
+                              <div style={{fontSize:10,letterSpacing:2,color:"#3a6070",marginBottom:10}}>
+                                EVENT LOG — {(h.actions||ordered).length} ACTIONS
+                              </div>
+                              {streets.filter(streetHasContent).map(st=>(
+                                <div key={st} style={{marginBottom:12}}>
+                                  {/* street header */}
+                                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                                    <div style={{fontSize:10,letterSpacing:2,color:"#00f5ff88",fontWeight:"bold",
+                                      padding:"2px 8px",background:"rgba(0,245,255,0.05)",
+                                      border:"1px solid #00f5ff22",borderRadius:2}}>{st}</div>
+                                    {/* show new community cards revealed this street */}
+                                    {st!=="PRE-FLOP"&&(streetCards[st]||[]).filter(Boolean).map((c,ci)=>{
                                       const cs=typeof c==="string"?c:(c?.rank||"")+(c?.suit||"");
+                                      if(!cs) return null;
                                       const red=cs.includes("♥")||cs.includes("♦");
                                       return(
-                                        <span key={ci} style={{fontSize:12,padding:"2px 6px",
-                                          fontWeight:"bold",
-                                          background:"linear-gradient(135deg,#0d1b2a,#162032)",
+                                        <div key={ci} style={{width:24,height:32,borderRadius:2,display:"flex",
+                                          flexDirection:"column",alignItems:"center",justifyContent:"center",
+                                          fontWeight:"bold",background:"linear-gradient(135deg,#0d1b2a,#162032)",
                                           border:`1px solid ${red?"#ff4466":"#6699cc"}`,
-                                          borderRadius:3,color:red?"#ff6688":"#c8d8f0"}}>
+                                          color:red?"#ff6688":"#c8d8f0",fontSize:9}}>
                                           {cs}
-                                        </span>
+                                        </div>
                                       );
                                     })}
+                                    <div style={{flex:1,height:"1px",background:"#091e30"}}/>
                                   </div>
-                                )}
-                                {p.handRank&&<span style={{fontSize:11,color:"#7ad0a0",letterSpacing:1}}>{p.handRank}</span>}
-                                {p.folded&&!isWinner&&(
-                                  <span style={{fontSize:10,color:"#3a5060",background:"rgba(0,0,0,0.3)",
-                                    padding:"1px 6px",border:"1px solid #1a3040",letterSpacing:1}}>FOLDED</span>
-                                )}
-                                {isWinner&&(
-                                  <span style={{fontSize:10,color:"#4ade80",background:"rgba(74,222,128,0.08)",
-                                    padding:"1px 6px",border:"1px solid #4ade8033",letterSpacing:1}}>WON</span>
-                                )}
-                              </div>
 
-                              {/* street actions */}
-                              {(p.streetActions||[]).length>0&&(
-                                <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:4}}>
-                                  {p.streetActions.map((sa,si)=>{
-                                    const ac=actionColor[sa.action]||"#5a8090";
+                                  {/* blinds line for pre-flop */}
+                                  {st==="PRE-FLOP"&&(h.sb||h.bb)&&(
+                                    <div style={{display:"flex",gap:8,marginBottom:4,paddingLeft:8,flexWrap:"wrap"}}>
+                                      {[[h.sb,"SB","#fb923c"],[h.bb,"BB","#4ade80"]].filter(([n])=>n).map(([name,role,col])=>(
+                                        <div key={role} style={{display:"flex",alignItems:"center",gap:5,
+                                          padding:"3px 8px",borderRadius:2,
+                                          background:`${col}0a`,border:`1px solid ${col}22`}}>
+                                          <span style={{fontSize:9,color:col,letterSpacing:1,fontWeight:"bold"}}>{role}</span>
+                                          <span style={{fontSize:11,color:"#7ab8cc"}}>{name}</span>
+                                          <span style={{fontSize:10,color:"#f0cc55"}}>posts blind</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {/* actions in order */}
+                                  {(byStreet[st]||[]).map((a,ai)=>{
+                                    const ac=actionColor[a.action]||"#5a8090";
+                                    const isRaise=a.action==="raise"||a.action==="all-in";
                                     return(
-                                      <div key={si} style={{display:"flex",alignItems:"center",gap:3,
-                                        padding:"2px 7px",borderRadius:2,
-                                        background:`${ac}12`,border:`1px solid ${ac}33`}}>
-                                        <span style={{fontSize:9,color:"#3a5060",letterSpacing:1}}>
-                                          {(sa.street||"").replace("PRE-FLOP","PRE")}
-                                        </span>
-                                        <span style={{fontSize:11,color:ac,fontWeight:"bold",
-                                          letterSpacing:1,textTransform:"uppercase"}}>
-                                          {sa.action}{sa.amount>0?` ◈${sa.amount}`:""}
-                                        </span>
+                                      <div key={ai} style={{display:"flex",alignItems:"flex-start",gap:8,
+                                        padding:"4px 8px",marginBottom:2,borderRadius:2,
+                                        background:isRaise?"rgba(240,204,85,0.03)":"transparent",
+                                        borderLeft:`2px solid ${isRaise?ac+"44":"#0a1e30"}`}}>
+                                        {/* step number */}
+                                        <span style={{fontSize:9,color:"#1a4050",minWidth:16,paddingTop:2,
+                                          fontFamily:"monospace"}}>{ai+1}.</span>
+                                        {/* icon */}
+                                        <span style={{fontSize:11,paddingTop:1}}>{a.icon||"◈"}</span>
+                                        {/* name */}
+                                        <span style={{fontSize:12,color:a.color||"#7ab8cc",fontWeight:"bold",
+                                          minWidth:70,letterSpacing:0.5}}>{a.name}</span>
+                                        {/* action badge */}
+                                        <div style={{display:"flex",alignItems:"center",gap:4,flex:1,flexWrap:"wrap"}}>
+                                          <span style={{fontSize:11,color:ac,fontWeight:"bold",letterSpacing:1,
+                                            textTransform:"uppercase",padding:"1px 7px",
+                                            background:`${ac}12`,border:`1px solid ${ac}33`,borderRadius:2}}>
+                                            {a.action}
+                                          </span>
+                                          {a.amount>0&&(
+                                            <span style={{fontSize:11,color:"#f0cc55",fontWeight:"bold"}}>
+                                              ◈ {a.amount}
+                                            </span>
+                                          )}
+                                          {a.thought&&(
+                                            <span style={{fontSize:10,color:"#3a6070",fontStyle:"italic",
+                                              flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",
+                                              whiteSpace:"nowrap"}}>
+                                              "{a.thought}"
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
                                     );
                                   })}
                                 </div>
-                              )}
-
-                              {/* thought */}
-                              {p.thought&&(
-                                <div style={{fontSize:10,color:"#4a7080",fontStyle:"italic",
-                                  marginTop:2,lineHeight:1.4}}>
-                                  "{p.thought}"
-                                </div>
-                              )}
+                              ))}
                             </div>
                           );
-                        })}
+                        })()}
                       </div>
                     </div>
                   ))}
